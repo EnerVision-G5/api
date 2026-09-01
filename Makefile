@@ -15,7 +15,7 @@ help:
 env:
 	@test -f .env || (cp .env.example .env && echo ".env créé depuis .env.example")
 
-## up : démarre l'API + Postgres en dev (http://localhost:8000/docs)
+## up : démarre l'API + Postgres en dev (http://localhost:8080/docs)
 .PHONY: up
 up: env
 	$(COMPOSE) up --build

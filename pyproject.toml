@@ -19,6 +19,9 @@ dependencies = [
     "alembic==1.19.1",
     "python-jose[cryptography]==3.5.0",
     "passlib[bcrypt]==1.7.4",
+    # passlib 1.7.4 lit bcrypt.__about__, supprimé depuis bcrypt 4.1 : au delà
+    # le hachage lève ValueError. Ne pas monter sans remplacer passlib.
+    "bcrypt==4.0.1",
 ]
 
 [project.optional-dependencies]
