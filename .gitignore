@@ -1,8 +1,22 @@
+# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
 .venv/
 venv/
+
+# Tests / couverture / typage
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets / local
 .env
+*.local
+
+# Éditeurs / OS
+.vscode/
+.idea/
+.DS_Store
