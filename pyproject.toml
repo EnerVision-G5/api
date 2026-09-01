@@ -1,0 +1,51 @@
+[project]
+name = "enervision-api"
+version = "0.1.0"
+description = "EnerVision — API FastAPI"
+requires-python = ">=3.12"
+
+# Dépendances runtime — versions épinglées.
+# Le lock complet (transitif) est dans requirements.txt / requirements-dev.txt.
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.52.4",
+    "pydantic-settings==2.15.0",
+    "sqlalchemy==2.0.52",
+    "psycopg[binary]==3.3.5",
+    "alembic==1.19.1",
+    "python-jose[cryptography]==3.5.0",
+    "passlib[bcrypt]==1.7.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "httpx==0.28.1",
+    "ruff==0.16.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.pytest.ini_options]
+addopts = "-q --cov=app --cov-report=term-missing"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["app"]
