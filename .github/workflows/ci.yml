@@ -9,11 +9,17 @@ env:
   CONTRACTS_REF: develop
 
 jobs:
+  # EV-02 et EV-38 demandaient tous deux un job lint + tests. Un seul est
+  # conservé, celui déjà sur develop, dont les outils sont épinglés par
+  # requirements-dev.txt. EV-02 y ajoute le checkout récursif des submodules et
+  # l'étape de build, qui pour ce repo est la génération de la spécification.
   lint-and-test:
-    name: ruff + pytest
+    name: ruff + pytest + build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-python@v5
         with:
@@ -29,11 +35,16 @@ jobs:
       - name: pytest
         run: pytest
 
+      - name: Build (génération de la spécification OpenAPI)
+        run: python scripts/export_openapi.py > /dev/null
+
   contract-drift:
     name: Dérive du contrat OpenAPI
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-python@v5
         with:
