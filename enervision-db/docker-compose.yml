@@ -1,0 +1,34 @@
+# docker-compose.yml — Base EnerVision (TimescaleDB / PG16)
+# Usage : cp .env.example .env  →  docker compose up -d
+# Les scripts de ./initdb ne s'exécutent qu'au PREMIER démarrage
+# (volume vide). Pour réappliquer le schéma : docker compose down -v
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.17.2-pg16   # version épinglée = même schéma en local et sur la VM
+    container_name: timescaledb
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-enervision}
+      POSTGRES_USER: ${POSTGRES_USER:-enervision}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?definir POSTGRES_PASSWORD dans .env}
+      # Disable TimescaleDB telemetry
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+
+volumes:
+  timescaledb_data:
+    driver: local
