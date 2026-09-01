@@ -1,5 +1,7 @@
 # api
 
+[![ci](https://github.com/EnerVision-G5/api/actions/workflows/ci.yml/badge.svg)](https://github.com/EnerVision-G5/api/actions/workflows/ci.yml)
+
 API métier EnerVision, on-premise. Sert les sites, les mesures énergétiques et
 les alertes sous JWT.
 
