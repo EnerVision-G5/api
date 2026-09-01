@@ -17,7 +17,7 @@ from pathlib import Path
 # Permet l'exécution directe du script depuis la racine du repo.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.main import CONTRACT_VERSION, app  # noqa: E402
+from app.main import CONTRACT_VERSION, app
 
 
 def build_spec() -> dict:
