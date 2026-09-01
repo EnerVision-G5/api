@@ -1,0 +1,33 @@
+# Stack "classique" : image buildée depuis le Dockerfile de prod + Postgres.
+# Démarrage : docker compose up --build
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-enervision}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-enervision}
+      POSTGRES_DB: ${POSTGRES_DB:-enervision}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-enervision}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
