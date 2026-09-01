@@ -5,11 +5,12 @@ __pycache__/
 .venv/
 venv/
 
-# Tests / couverture
+# Tests / couverture / typage
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
-.ruff_cache/
 
 # Secrets / local
 .env

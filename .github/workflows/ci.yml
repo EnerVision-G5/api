@@ -4,8 +4,13 @@ on:
   push:
   pull_request:
 
+env:
+  # Branche du repo enervision qui porte le contrat gelé de référence.
+  CONTRACTS_REF: develop
+
 jobs:
   lint-and-test:
+    name: ruff + pytest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,3 +28,33 @@ jobs:
 
       - name: pytest
         run: pytest
+
+  contract-drift:
+    name: Dérive du contrat OpenAPI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - name: Récupérer le contrat gelé
+        uses: actions/checkout@v4
+        with:
+          repository: EnerVision-G5/enervision
+          ref: ${{ env.CONTRACTS_REF }}
+          path: enervision
+          # Le GITHUB_TOKEN par défaut ne lit pas les autres repos privés de
+          # l'organisation : un token dédié en lecture seule reste nécessaire.
+          token: ${{ secrets.CONTRACTS_READ_TOKEN }}
+
+      - name: Comparer le code au contrat gelé
+        run: |
+          python scripts/export_openapi.py > /tmp/openapi-current.json
+          diff -u enervision/docs/contracts/openapi-api.json /tmp/openapi-current.json \
+            || { echo "::error::Le code a dérivé du contrat gelé. Ouvrir une PR sur enervision/docs/contracts ou corriger le code."; exit 1; }
