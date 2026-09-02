@@ -1,8 +1,14 @@
 name: ci
 
 on:
+  # Sur master, la CI est jouée par cd.yml (via workflow_call) juste avant le
+  # build de l'image : inutile de la lancer deux fois.
   push:
+    branches-ignore: [master]
   pull_request:
+  # Réutilisable : cd.yml appelle ce workflow pour garder une seule définition
+  # des étapes lint / test / build / dérive du contrat.
+  workflow_call:
 
 env:
   # Branche du repo enervision qui porte le contrat gelé de référence.
