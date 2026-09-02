@@ -16,6 +16,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # Rend host.docker.internal resolvable y compris sous Linux, ou il ne
+    # l'est pas par defaut : `make test` joint ainsi la base de test publiee
+    # sur le port 5433 de l'hote par compose.test.yml.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     stdin_open: true
     tty: true
 
