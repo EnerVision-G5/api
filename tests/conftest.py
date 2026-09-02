@@ -1,38 +1,58 @@
 """Fixtures de test de l'API métier.
 
-Les endpoints de lecture (EV-11) sont testés contre une base PostgreSQL /
-TimescaleDB réelle, pas contre un double : les comportements qui comptent ici
-sont ceux du moteur, à savoir le tri sur une hypertable, le décalage de
-pagination, le comptage exact, la traversée des NULL et celle d'un TEXT[].
-Un faux dépôt en mémoire ne prouverait rien de tout cela.
+Les endpoints de lecture (EV-11) et l'authentification (EV-12) sont testés
+contre une base PostgreSQL / TimescaleDB réelle, pas contre un double : les
+comportements qui comptent ici sont ceux du moteur, à savoir le tri sur une
+hypertable, le décalage de pagination, le comptage exact, la traversée des
+NULL et celle d'un TEXT[]. Un faux dépôt en mémoire ne prouverait rien de
+tout cela.
 
 La base est fournie par le service container du workflow CI et par
 compose.test.yml en local, dans les deux cas avec l'image
 timescale/timescaledb:2.17.2-pg16, celle de la vraie base.
 
 Limite assumée : le schéma de test est construit depuis les modèles ORM
-(app.models.energy), pas depuis les scripts d'initdb, qui vivent dans le repo
-infra et ne sont pas accessibles à la CI de ce repo sans clé de déploiement
+(app.models), pas depuis les scripts d'initdb, qui vivent dans le repo infra
+et ne sont pas accessibles à la CI de ce repo sans clé de déploiement
 supplémentaire. Les modèles portent les mêmes colonnes et les mêmes CHECK, et
-test_schema_conformite verrouille cette correspondance ; une divergence
-constatée avec infra/enervision-db/initdb/ est un bug des modèles.
+test_schema_conformite verrouille les colonnes ; une divergence constatée avec
+infra/enervision-db/initdb/ est un bug des modèles.
 """
 
 import os
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import pytest
-from fastapi.testclient import TestClient
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+# Posé AVANT l'import de l'application : app.core.config instancie ses réglages
+# à l'import et mémoïse le résultat. Un JWT_SECRET fixé plus tard arriverait
+# après la mise en cache, et l'API démarrerait sans clé utilisable.
+#
+# Le test porte sur la valeur et pas seulement sur la présence de la clé :
+# .env.example livre JWT_SECRET vide, et le conteneur de développement injecte
+# ce fichier tel quel. Un setdefault verrait la variable définie, la laisserait
+# vide, et toute la suite échouerait faute de clé signable. Un vrai secret déjà
+# présent dans l'environnement, lui, est respecté.
+if not os.environ.get("JWT_SECRET"):
+    os.environ["JWT_SECRET"] = "cle-de-signature-de-test-suffisamment-longue"
 
-from app.core.config import get_settings
-from app.db.base import Base
-from app.db.session import get_db
-from app.main import app
-from app.models.energy import Mesure, Site
+# Forcé, non pas par défaut : la suite est écrite pour l'authentification
+# active, et un .env local à false la ferait échouer en masse. Les tests du
+# mode anonyme passent par la fixture auth_disabled.
+os.environ["AUTH_ENABLED"] = "true"
+
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+
+from app.core.config import get_settings  # noqa: E402
+from app.db.base import Base  # noqa: E402
+from app.db.session import get_db  # noqa: E402
+from app.main import app  # noqa: E402
+from app.models.energy import Mesure, Site  # noqa: E402
+from app.models.user import LOCAL_PROVIDER, AppUser  # noqa: E402
+from app.security import hash_password  # noqa: E402
 
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
@@ -52,6 +72,21 @@ SITE_UNKNOWN = "SITE999"
 
 # Nombre de mesures de SITE_WITH_READINGS, base des assertions de pagination.
 READINGS_COUNT = 5
+
+# Comptes de test, miroirs des deux comptes du seed de développement
+# (infra/enervision-db/dev-seed/01_dev_users.sql).
+READER_USERNAME = "dev.reader"
+WRITER_USERNAME = "dev.writer"
+TEST_PASSWORD = "mot-de-passe-de-test"
+
+# Identité fédérée : présente en base, sans mot de passe local. Elle ne doit
+# pas pouvoir se connecter par le flux mot de passe.
+FEDERATED_USERNAME = "federe.sans.mot.de.passe"
+FEDERATED_PROVIDER = "keycloak"
+
+UNKNOWN_USERNAME = "personne"
+
+TOKEN_URL = "/api/v1/auth/token"
 
 
 def _sites() -> list[Site]:
@@ -85,6 +120,41 @@ def _sites() -> list[Site]:
             location="Marseille, France",
             capacity_kw=Decimal("800.00"),
             status="inactive",
+        ),
+    ]
+
+
+def _users() -> list[AppUser]:
+    """Comptes de test : un reader, un writer, et une identité fédérée.
+
+    Les mots de passe sont hachés ici comme l'API les hache, jamais stockés en
+    clair, y compris dans un jeu de test.
+    """
+    password_hash = hash_password(TEST_PASSWORD)
+    return [
+        AppUser(
+            oauth_provider=LOCAL_PROVIDER,
+            oauth_subject=READER_USERNAME,
+            email="dev.reader@enervision.local",
+            display_name="Dev Reader",
+            role="reader",
+            password_hash=password_hash,
+        ),
+        AppUser(
+            oauth_provider=LOCAL_PROVIDER,
+            oauth_subject=WRITER_USERNAME,
+            email="dev.writer@enervision.local",
+            display_name="Dev Writer",
+            role="writer",
+            password_hash=password_hash,
+        ),
+        AppUser(
+            oauth_provider=FEDERATED_PROVIDER,
+            oauth_subject=FEDERATED_USERNAME,
+            email="federe@enervision.local",
+            display_name="Identité fédérée",
+            role="reader",
+            password_hash=None,
         ),
     ]
 
@@ -217,6 +287,13 @@ def _readings() -> list[Mesure]:
     ]
 
 
+def assert_error_response(payload: dict) -> None:
+    """Vérifie qu'un corps d'erreur respecte le modèle ErrorResponse du contrat."""
+    assert set(payload) == {"detail"}
+    assert isinstance(payload["detail"], str)
+    assert payload["detail"]
+
+
 @pytest.fixture
 def client() -> TestClient:
     """Client synchrone, pour les tests qui ne touchent pas la base."""
@@ -241,9 +318,9 @@ async def engine(anyio_backend: str):
 async def seeded_database(engine) -> None:
     """Construit le schéma, le peuple, et le laisse en place.
 
-    Portée session : tous les tests d'EV-11 sont des lectures, aucun ne
-    modifie les données, donc rien ne justifie de reconstruire la base à
-    chaque test.
+    Portée session : les tests sont des lectures et des authentifications,
+    aucun ne modifie le jeu de données, donc rien ne justifie de reconstruire
+    la base à chaque test.
     """
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS timescaledb"))
@@ -261,14 +338,15 @@ async def seeded_database(engine) -> None:
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         session.add_all(_sites())
+        session.add_all(_users())
         await session.flush()
         session.add_all(_readings())
         await session.commit()
 
 
 @pytest.fixture
-async def api_client(engine, seeded_database) -> AsyncClient:
-    """Client HTTP asynchrone parlant à l'application, branché sur la base de test."""
+async def anonymous_client(engine, seeded_database) -> AsyncClient:
+    """Client HTTP asynchrone sans jeton, branché sur la base de test."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def override_get_db():
@@ -282,17 +360,47 @@ async def api_client(engine, seeded_database) -> AsyncClient:
     app.dependency_overrides.pop(get_db, None)
 
 
+async def obtain_token(http_client: AsyncClient, username: str) -> str:
+    """Récupère un jeton par le vrai endpoint, pas en le forgeant.
+
+    Les tests des routes protégées passent ainsi par le même chemin que le
+    dashboard : si la délivrance casse, ils cassent aussi.
+    """
+    response = await http_client.post(
+        TOKEN_URL,
+        data={"username": username, "password": TEST_PASSWORD},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["access_token"]
+
+
 @pytest.fixture
-def auth_enabled(monkeypatch: pytest.MonkeyPatch):
-    """Active AUTH_ENABLED le temps d'un test.
+async def api_client(anonymous_client: AsyncClient) -> AsyncClient:
+    """Client authentifié en reader : le cas courant depuis EV-12."""
+    token = await obtain_token(anonymous_client, READER_USERNAME)
+    anonymous_client.headers["Authorization"] = f"Bearer {token}"
+    return anonymous_client
+
+
+@pytest.fixture
+async def writer_client(anonymous_client: AsyncClient) -> AsyncClient:
+    """Client authentifié en writer."""
+    token = await obtain_token(anonymous_client, WRITER_USERNAME)
+    anonymous_client.headers["Authorization"] = f"Bearer {token}"
+    return anonymous_client
+
+
+@pytest.fixture
+def auth_disabled(monkeypatch: pytest.MonkeyPatch):
+    """Repasse AUTH_ENABLED à false le temps d'un test.
 
     Le cache de get_settings est vidé de part et d'autre : à l'entrée pour que
     la nouvelle valeur soit lue, à la sortie pour qu'elle ne fuite pas vers les
-    tests suivants. Le vidage de sortie a lieu après le retrait de la variable,
-    sinon le cache serait reconstruit sur l'ancienne valeur.
+    tests suivants. Le vidage de sortie a lieu après la restauration de la
+    variable, sinon le cache serait reconstruit sur la valeur du test.
     """
-    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setenv("AUTH_ENABLED", "false")
     get_settings.cache_clear()
     yield
-    monkeypatch.delenv("AUTH_ENABLED", raising=False)
+    monkeypatch.setenv("AUTH_ENABLED", "true")
     get_settings.cache_clear()
