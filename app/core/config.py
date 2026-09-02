@@ -16,8 +16,16 @@ class Settings(BaseSettings):
     environment: str = "development"
     debug: bool = False
 
-    # Base de données
-    database_url: str = "postgresql+psycopg://enervision:enervision@db:5432/enervision"
+    # Base de données — dialecte asyncpg (SQLAlchemy 2 asynchrone).
+    # La valeur réelle vient toujours de DATABASE_URL dans l'environnement :
+    # le défaut ci-dessous ne vaut que pour le poste de développement, où le
+    # service Postgres du compose porte ces identifiants.
+    database_url: str = "postgresql+asyncpg://enervision:enervision@db:5432/enervision"
+
+    # Authentification. false (défaut) : les lectures sont servies en anonyme.
+    # true : elles répondent 501 tant qu'EV-12 n'a pas livré la vérification du
+    # jeton, ce qui évite de laisser croire à une protection inexistante.
+    auth_enabled: bool = False
 
     # Sécurité / JWT
     secret_key: str = "change-me-in-env"
