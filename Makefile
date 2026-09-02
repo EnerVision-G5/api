@@ -1,7 +1,12 @@
 # Makefile — API FastAPI (dev via Docker)
 
 COMPOSE := docker compose -f compose.dev.yml
+TEST_COMPOSE := docker compose -f compose.test.yml
 SERVICE := api
+
+# Base de test vue depuis le conteneur api : les deux composes ont chacun
+# leur reseau, le conteneur passe donc par le port publie sur l'hote.
+TEST_DB_URL := postgresql+asyncpg://enervision:enervision@host.docker.internal:5433/enervision_test
 
 .DEFAULT_GOAL := help
 
@@ -55,10 +60,20 @@ lint:
 fmt:
 	$(COMPOSE) run --rm $(SERVICE) sh -c "ruff check --fix . && ruff format ."
 
-## test : pytest
+## test-db : demarre la base des tests d'integration (TimescaleDB, port 5433)
+.PHONY: test-db
+test-db:
+	$(TEST_COMPOSE) up -d --wait
+
+## test-db-down : arrete la base des tests
+.PHONY: test-db-down
+test-db-down:
+	$(TEST_COMPOSE) down
+
+## test : pytest dans le conteneur api, contre la base de test
 .PHONY: test
-test:
-	$(COMPOSE) run --rm $(SERVICE) pytest
+test: test-db
+	$(COMPOSE) run --rm -e TEST_DATABASE_URL=$(TEST_DB_URL) $(SERVICE) pytest
 
 ## migrate : applique les migrations Alembic
 .PHONY: migrate

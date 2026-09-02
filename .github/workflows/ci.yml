@@ -16,6 +16,28 @@ jobs:
   lint-and-test:
     name: ruff + pytest + build
     runs-on: ubuntu-latest
+
+    # Les tests des endpoints de lecture (EV-11) interrogent une vraie base et
+    # non un double. Même image et même version que la base d'exploitation,
+    # pour que le tri sur hypertable, le TEXT[] de null_reasons et les NUMERIC
+    # se comportent en CI comme en production.
+    services:
+      test-db:
+        image: timescale/timescaledb:2.17.2-pg16
+        env:
+          POSTGRES_DB: enervision_test
+          POSTGRES_USER: enervision
+          # Base éphémère, détruite avec le runner : ce mot de passe ne protège
+          # rien, il n'a pas sa place dans les secrets du repo.
+          POSTGRES_PASSWORD: enervision
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U enervision -d enervision_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,6 +55,8 @@ jobs:
         run: ruff check .
 
       - name: pytest
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://enervision:enervision@localhost:5433/enervision_test
         run: pytest
 
       - name: Build (génération de la spécification OpenAPI)
