@@ -5,10 +5,15 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from httpx import AsyncClient
 from jose import jwt
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.models.user import LOCAL_PROVIDER, AppUser
+from app.password import needs_rehash, verify_password
 from tests.conftest import (
     FEDERATED_USERNAME,
+    LEGACY_USERNAME,
     READER_USERNAME,
     SITE_WITH_READINGS,
     TEST_PASSWORD,
@@ -17,6 +22,7 @@ from tests.conftest import (
     WRITER_USERNAME,
     assert_error_response,
     obtain_token,
+    weak_hasher,
 )
 
 pytestmark = pytest.mark.anyio
@@ -218,6 +224,63 @@ async def test_token_signed_with_another_key_is_refused(
     )
 
     assert response.status_code == 401
+
+
+async def stored_hash_of(session: AsyncSession, username: str) -> str:
+    """Relit le hachage en base, hors de tout cache d'identité."""
+    return await session.scalar(
+        select(AppUser.password_hash).where(
+            AppUser.oauth_provider == LOCAL_PROVIDER,
+            AppUser.oauth_subject == username,
+        ),
+    )
+
+
+async def test_login_rehashes_an_outdated_hash(
+    anonymous_client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """Une connexion réussie remplace un hachage aux paramètres dépassés.
+
+    C'est le seul instant où l'API détient le mot de passe en clair, donc le
+    seul où le remplaçant peut être calculé.
+    """
+    # Le hachage faible est reposé ici plutôt que laissé au seed : le test
+    # reste vrai s'il est rejoué sur une base déjà remise à niveau.
+    await db_session.execute(
+        update(AppUser)
+        .where(
+            AppUser.oauth_provider == LOCAL_PROVIDER,
+            AppUser.oauth_subject == LEGACY_USERNAME,
+        )
+        .values(password_hash=weak_hasher.hash(TEST_PASSWORD)),
+    )
+    await db_session.commit()
+    before = await stored_hash_of(db_session, LEGACY_USERNAME)
+    assert needs_rehash(before) is True
+
+    await obtain_token(anonymous_client, LEGACY_USERNAME)
+
+    # Nouvelle transaction : celle du test ne verrait pas le commit de l'API.
+    await db_session.rollback()
+    after = await stored_hash_of(db_session, LEGACY_USERNAME)
+    assert after != before
+    assert needs_rehash(after) is False
+    # Le compte reste utilisable avec le même mot de passe.
+    assert verify_password(TEST_PASSWORD, after) is True
+
+
+async def test_login_leaves_a_current_hash_untouched(
+    anonymous_client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """Un hachage à jour n'est pas réécrit : pas d'écriture à chaque connexion."""
+    before = await stored_hash_of(db_session, READER_USERNAME)
+
+    await obtain_token(anonymous_client, READER_USERNAME)
+
+    await db_session.rollback()
+    assert await stored_hash_of(db_session, READER_USERNAME) == before
 
 
 async def test_token_without_subject_is_refused(

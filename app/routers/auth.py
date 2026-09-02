@@ -11,6 +11,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, status
 from fastapi.security import OAuth2PasswordRequestForm
 
+from app.password import hash_password, needs_rehash
 from app.schemas.auth import TokenResponse
 from app.schemas.common import ErrorResponse
 from app.security import (
@@ -62,6 +63,13 @@ async def create_token(
         raise unauthorized(INVALID_CREDENTIALS)
 
     token, expires_in = create_access_token(user.oauth_subject, user.role)
+
+    # Remise à niveau du hachage. C'est le seul instant où l'API détient le
+    # mot de passe en clair : si les paramètres d'argon2 ont durci depuis la
+    # création du compte, le remplaçant se calcule maintenant ou jamais.
+    if needs_rehash(user.password_hash):
+        user.password_hash = hash_password(form_data.password)
+
     # Trace de dernière connexion : la colonne existe au schéma pour cela, et
     # c'est le seul moment où l'API la connaît.
     user.last_login_at = datetime.now(UTC)

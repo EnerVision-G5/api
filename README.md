@@ -61,7 +61,8 @@ uvicorn app.main:app --reload --port 8080
 | `app/schemas/energy.py` | `SiteOut`, `EnergyReadingOut`, `ReadingsPage`, `AlertOut` |
 | `app/schemas/auth.py` | `TokenResponse`, `UserOut` |
 | `app/models/user.py` | Modèle ORM `AppUser` (comptes locaux, rôles) |
-| `app/security.py` | Hachage, JWT, `get_current_user`, `require_role` |
+| `app/password.py` | Hachage argon2id (seul module à le manipuler) |
+| `app/security.py` | JWT, `get_current_user`, `require_role` |
 | `app/routers/` | Routes, une par domaine, sans logique métier |
 | `alembic/` | Migrations |
 | `scripts/export_openapi.py` | Export de la spécification OpenAPI |
@@ -113,7 +114,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/sites
 ```
 
 Les comptes de développement `dev.reader` et `dev.writer` viennent du seed
-`enervision-db/dev-seed/01_dev_users.sql` du repo **infra**, à appliquer
+`enervision-db/dev-seed/dev_users.py` du repo **infra**, à appliquer
 explicitement : il est hors d'`initdb/` pour ne jamais atterrir en production.
 
 ### Configuration
@@ -132,6 +133,22 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 développement local. **À ne jamais déployer** : dans ce mode
 `get_current_user` rend `None` sans rien vérifier, et `require_role` laisse
 passer, faute d'utilisateur identifiable.
+
+### Hachage des mots de passe
+
+**argon2id**, via `argon2-cffi`, dans le seul module `app/password.py` :
+recommandation OWASP de premier choix, résistance au matériel dédié par le
+coût mémoire là où bcrypt ne coûte que du temps, et écosystème maintenu — à la
+différence de `passlib`, retiré du projet, qui n'est plus maintenu et se
+brouille avec les versions récentes de `bcrypt`.
+
+Les paramètres sont ceux d'`argon2-cffi` par défaut (`t=3`, `m=64 MiB`, `p=4`),
+au-dessus des minimums OWASP. Une connexion réussie dont le hachage a été
+produit avec des paramètres dépassés le remplace au passage : c'est le seul
+instant où l'API détient le mot de passe en clair.
+
+Aucun autre module ne manipule un hachage, et il n'existe qu'un seul
+mécanisme : pas de cohabitation bcrypt / argon2.
 
 ### Ce que fait la vérification
 
@@ -185,6 +202,9 @@ Les versions de FastAPI, Pydantic et Uvicorn sont épinglées dans
 pas les bumper sans PR de contrat.
 
 ## Secrets
+
+Les mots de passe sont hachés en argon2id, jamais stockés en clair, y compris
+dans les jeux de test et le seed de développement.
 
 `.env` est ignoré par Git, seul `.env.example` est versionné, et `JWT_SECRET`
 y est **volontairement vide** : aucune clé de signature ne doit exister dans

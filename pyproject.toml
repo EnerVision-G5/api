@@ -19,10 +19,11 @@ dependencies = [
     "asyncpg==0.30.0",
     "alembic==1.19.1",
     "python-jose[cryptography]==3.5.0",
-    "passlib[bcrypt]==1.7.4",
-    # passlib 1.7.4 lit bcrypt.__about__, supprimé depuis bcrypt 4.1 : au delà
-    # le hachage lève ValueError. Ne pas monter sans remplacer passlib.
-    "bcrypt==4.0.1",
+    # Hachage des mots de passe : argon2id, recommandation OWASP. passlib et
+    # bcrypt ont été retirés, passlib n'étant plus maintenu et se brouillant
+    # avec les versions récentes de bcrypt. Un seul mécanisme, dans
+    # app/password.py.
+    "argon2-cffi==25.1.0",
 ]
 
 [project.optional-dependencies]

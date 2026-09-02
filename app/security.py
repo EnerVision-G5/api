@@ -1,9 +1,12 @@
-"""Authentification de l'API : hachage des mots de passe, JWT et dépendances.
+"""Authentification de l'API : jetons JWT et dépendances FastAPI.
 
 Le flux est celui d'ADR-009 : OAuth2 mot de passe, jetons JWT signés en HS256
 par l'API et vérifiés à chaque requête, sans état côté serveur. La révocation
 avant expiration n'est pas possible sans liste de rejet, ce que l'ADR accepte
 à ce stade et qui justifie une durée de vie courte.
+
+Le hachage des mots de passe n'est pas ici : il vit dans app.password, seul
+module autorisé à le manipuler.
 """
 
 from collections.abc import Awaitable, Callable
@@ -14,13 +17,13 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_jwt_secret, get_settings
 from app.db.session import get_db
 from app.models.user import LOCAL_PROVIDER, AppUser
+from app.password import hash_password, verify_password
 from app.schemas.auth import UserOut
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token", auto_error=False)
@@ -38,30 +41,18 @@ INVALID_TOKEN = "Jeton absent, invalide ou expiré."
 # client comment s'authentifier plutôt que de le laisser deviner.
 BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 
 @lru_cache
 def _absent_user_hash() -> str:
     """Hachage de rebut, vérifié quand le compte demandé n'existe pas.
 
-    Sans lui, un utilisateur inconnu répondrait sans passer par bcrypt, donc
+    Sans lui, un utilisateur inconnu répondrait sans passer par argon2, donc
     bien plus vite qu'un mot de passe faux : le temps de réponse révélerait
     quels comptes existent, ce que le message d'erreur unique cherche
     précisément à cacher. Calculé au premier appel et mémoïsé, pour ne pas
-    payer un bcrypt à l'import du module.
+    payer un hachage à l'import du module.
     """
     return hash_password("aucun-compte-ne-porte-ce-mot-de-passe")
-
-
-def hash_password(password: str) -> str:
-    """Hache un mot de passe en bcrypt."""
-    return pwd_context.hash(password)
-
-
-def verify_password(password: str, password_hash: str) -> bool:
-    """Compare un mot de passe à son hachage. Jamais de comparaison en clair."""
-    return pwd_context.verify(password, password_hash)
 
 
 def unauthorized(detail: str) -> HTTPException:

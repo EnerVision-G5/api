@@ -41,6 +41,7 @@ if not os.environ.get("JWT_SECRET"):
 os.environ["AUTH_ENABLED"] = "true"
 
 import pytest  # noqa: E402
+from argon2 import PasswordHasher  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy import text  # noqa: E402
@@ -52,7 +53,7 @@ from app.db.session import get_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.energy import Mesure, Site  # noqa: E402
 from app.models.user import LOCAL_PROVIDER, AppUser  # noqa: E402
-from app.security import hash_password  # noqa: E402
+from app.password import hash_password  # noqa: E402
 
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
@@ -83,6 +84,16 @@ TEST_PASSWORD = "mot-de-passe-de-test"
 # pas pouvoir se connecter par le flux mot de passe.
 FEDERATED_USERNAME = "federe.sans.mot.de.passe"
 FEDERATED_PROVIDER = "keycloak"
+
+# Compte dont le hachage a été produit avec des paramètres dépassés, pour
+# observer la remise à niveau à la connexion.
+LEGACY_USERNAME = "dev.parametres.depasses"
+
+# Paramètres volontairement en dessous de ceux d'argon2-cffi, donc de ce que
+# app.password produit. C'est le seul endroit du projet qui construit un
+# PasswordHasher à la main : fabriquer un hachage périmé exige de sortir de
+# app.password, qui n'expose que les paramètres courants.
+weak_hasher = PasswordHasher(time_cost=1, memory_cost=8192, parallelism=1)
 
 UNKNOWN_USERNAME = "personne"
 
@@ -155,6 +166,14 @@ def _users() -> list[AppUser]:
             display_name="Identité fédérée",
             role="reader",
             password_hash=None,
+        ),
+        AppUser(
+            oauth_provider=LOCAL_PROVIDER,
+            oauth_subject=LEGACY_USERNAME,
+            email="depasse@enervision.local",
+            display_name="Hachage à remettre à niveau",
+            role="reader",
+            password_hash=weak_hasher.hash(TEST_PASSWORD),
         ),
     ]
 
@@ -342,6 +361,14 @@ async def seeded_database(engine) -> None:
         await session.flush()
         session.add_all(_readings())
         await session.commit()
+
+
+@pytest.fixture
+async def db_session(engine, seeded_database):
+    """Session directe sur la base de test, pour observer ce que l'API y écrit."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        yield session
 
 
 @pytest.fixture
