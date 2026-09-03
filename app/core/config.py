@@ -72,6 +72,35 @@ class Settings(BaseSettings):
     # lecture en base.
     predict_timeout_seconds: float = 10.0
 
+    # --- Seuils des indicateurs de confiance ---------------------------------
+    #
+    # En configuration et non en constantes de module : ce sont des réglages de
+    # pilote, que le client ajuste après avoir vu ses propres données. Les
+    # figer dans le code ferait d'un ajustement de seuil un redéploiement.
+    #
+    # Ils sont publiés dans la réponse des indicateurs, à côté de la valeur
+    # mesurée. Sans cela, le dashboard devrait les redéclarer de son côté, et
+    # deux vérités divergeraient sans que rien ne le signale — c'est exactement
+    # ce qui s'est produit avec le seuil de fraîcheur, à 120 s côté front
+    # contre 180 s côté collecteur.
+
+    # Âge au-delà duquel la dernière mesure d'un site est tenue pour en
+    # retard. 180 s est la valeur de `collector.lag_warning_s` du repo predict,
+    # soit trois cadences manquées : en deçà, un à-coup de la source alerterait
+    # sans qu'aucune donnée ne soit perdue.
+    stale_threshold_seconds: float = 180.0
+
+    # Part de mesures dégradées au-delà de laquelle la fiabilité du site est
+    # tenue pour compromise. Même valeur que le DEGRADED_RATIO des règles de
+    # recommandation, et pour cause : c'est le même fait.
+    degraded_ratio_threshold: float = 0.20
+
+    # Rapport toléré entre l'erreur des prévisions servies et la consommation
+    # moyenne du site sur la fenêtre. Un rapport et non des kilowatts : 20 kW
+    # d'écart n'ont pas le même sens sur un bureau de 200 kW et sur une usine
+    # de 1000.
+    drift_mae_ratio: float = 0.15
+
 
 @lru_cache
 def get_settings() -> Settings:

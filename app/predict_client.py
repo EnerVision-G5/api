@@ -32,6 +32,25 @@ class ServingUnavailableError(RuntimeError):
     """
 
 
+class ServingNotReadyError(ServingUnavailableError):
+    """Serving répond, mais n'a rien à servir : aucun modèle résolu.
+
+    Sous-classe, donc rattrapée par tout appelant qui ne veut pas la
+    distinguer. Elle existe parce que deux pannes très différentes sortaient
+    jusqu'ici sous la même exception : un service injoignable, qui est un
+    incident, et un registre vide, qui est l'état NORMAL du projet tant
+    qu'aucun modèle n'est promu.
+
+    La distinction se fait sur le code de statut et jamais sur le texte du
+    message : c'est le contrat de predict qui déclare le 503, un message est
+    libre de changer sans PR de contrat.
+
+    C'est elle qui permettra au mode dégradé des recommandations de répondre
+    200 en disant pourquoi, au lieu de propager un 503 que le dashboard ne
+    saurait pas expliquer.
+    """
+
+
 def build_client() -> httpx.AsyncClient:
     """Fabrique le client HTTP de l'appel à Serving.
 
@@ -49,6 +68,11 @@ async def request_prediction(site_id: str, horizon_hours: int) -> ServingPredict
     réponse non 200, ou réponse 200 dont la forme ne respecte pas le contrat
     de predict. Ce dernier cas est un échec de Serving et non de l'API : rien
     d'exploitable n'en sort, il n'y a donc rien à archiver.
+
+    Le 503 sort en ServingNotReadyError, sous-classe de la précédente : un
+    registre vide est l'état normal du projet tant qu'aucun modèle n'est
+    promu, et le confondre avec un service injoignable ferait chercher une
+    panne d'infrastructure là où il n'y a rien à servir.
     """
     settings = get_settings()
     if not settings.predict_url:
@@ -66,6 +90,12 @@ async def request_prediction(site_id: str, horizon_hours: int) -> ServingPredict
         raise ServingUnavailableError(
             f"{type(error).__name__}: {error}",
         ) from error
+
+    if response.status_code == httpx.codes.SERVICE_UNAVAILABLE:
+        raise ServingNotReadyError(
+            "aucun modèle résolu par le registre (503) :"
+            f" {response.text[:200]!r}",
+        )
 
     if response.status_code != httpx.codes.OK:
         raise ServingUnavailableError(
