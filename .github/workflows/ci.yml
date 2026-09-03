@@ -102,3 +102,202 @@ jobs:
           python scripts/export_openapi.py > /tmp/openapi-current.json
           diff -u enervision/docs/contracts/openapi-api.json /tmp/openapi-current.json \
             || { echo "::error::Le code a dérivé du contrat gelé. Ouvrir une PR sur enervision/docs/contracts ou corriger le code."; exit 1; }
+
+  # Analyse de composition logicielle. L'image de production est scannée plutôt
+  # que requirements.txt seul : les CVE arrivent aussi par la base
+  # python:3.12-slim, que le lock du projet ne décrit pas.
+  sca-grype:
+    name: Grype (CVE de l'image)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Même Dockerfile que la livraison : ce qui est scanné ici est ce qui
+      # sera publié par cd.yml, à l'identique.
+      - name: Construire l'image à scanner
+        run: docker build -t enervision-api:scan .
+
+      - name: Grype
+        uses: anchore/scan-action@v6
+        with:
+          image: enervision-api:scan
+          # Bloque la CI sur High et Critical seulement, et seulement si un
+          # correctif existe : une CVE sans version corrigée n'est pas une
+          # action possible, la signaler bloquerait toutes les PR sans que
+          # personne ne puisse la lever.
+          severity-cutoff: high
+          only-fixed: true
+          fail-build: true
+          output-format: table
+          output-file: grype-report.txt
+
+      # always() : ces deux étapes doivent tourner même quand Grype a bloqué,
+      # sinon le rapport qui explique l'échec n'est jamais publié.
+      - name: Récapitulatif
+        if: always()
+        run: |
+          {
+            echo "### Grype — CVE corrigeables (>= high)"
+            echo
+            echo '```'
+            cat grype-report.txt || echo "(aucun rapport produit)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publier le rapport
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grype-report
+          path: grype-report.txt
+          if-no-files-found: warn
+
+  # Scan dynamique (DAST) : l'API est réellement démarrée, puis attaquée par
+  # ZAP à partir de sa propre spécification OpenAPI, donc sur les vraies routes
+  # et les vrais paramètres plutôt que sur une exploration à l'aveugle.
+  dast-zap:
+    name: OWASP ZAP (scan de l'API)
+    runs-on: ubuntu-latest
+    # Le scan actif interroge chaque opération du contrat : il dure quelques
+    # minutes, et une borne évite qu'un blocage ne consomme l'heure complète.
+    timeout-minutes: 30
+
+    # Base éphémère, comme pour pytest : sans schéma, chaque route de lecture
+    # répondrait 500 et le scan ne mesurerait que la page d'erreur. Port 5434
+    # pour ne pas entrer en conflit avec le 5433 du job de tests.
+    services:
+      scan-db:
+        image: timescale/timescaledb:2.17.2-pg16
+        env:
+          POSTGRES_DB: enervision_scan
+          POSTGRES_USER: enervision
+          POSTGRES_PASSWORD: enervision
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U enervision -d enervision_scan"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://enervision:enervision@localhost:5434/enervision_scan
+      SCAN_TARGET: http://127.0.0.1:8080
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      # Le schéma est construit depuis les modèles ORM, comme le fait
+      # tests/conftest.py : alembic/versions est vide, `upgrade head` ne
+      # créerait aucune table.
+      - name: Construire le schéma de la base éphémère
+        run: |
+          python - <<'PY'
+          import asyncio
+          import os
+
+          from sqlalchemy import text
+          from sqlalchemy.ext.asyncio import create_async_engine
+
+          import app.models  # noqa: F401  (enregistre les tables sur Base)
+          from app.db.base import Base
+
+          HYPERTABLE = (
+              "SELECT create_hypertable('mesure', 'ts',"
+              " chunk_time_interval => INTERVAL '7 days')"
+          )
+
+
+          async def main() -> None:
+              engine = create_async_engine(os.environ["DATABASE_URL"])
+              try:
+                  async with engine.begin() as conn:
+                      await conn.execute(
+                          text("CREATE EXTENSION IF NOT EXISTS timescaledb")
+                      )
+                      await conn.run_sync(Base.metadata.create_all)
+                      await conn.execute(text(HYPERTABLE))
+              finally:
+                  await engine.dispose()
+
+
+          asyncio.run(main())
+          PY
+
+      - name: Démarrer l'API à scanner
+        env:
+          ENVIRONMENT: ci
+          # Clé jetée avec le runner : elle ne signe que le trafic du scan.
+          JWT_SECRET: cle-de-signature-ephemere-du-scan-zap-ci
+          # Volontairement désactivée, et uniquement ici : sous JWT, ZAP ne
+          # verrait que des 401 et ne testerait aucun handler. Ce réglage ne
+          # sort pas de ce job, la CD publie l'image sans y toucher.
+          AUTH_ENABLED: "false"
+        run: |
+          nohup uvicorn app.main:app --host 127.0.0.1 --port 8080 \
+            > uvicorn.log 2>&1 &
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS "$SCAN_TARGET/api/v1/health" >/dev/null; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          cat uvicorn.log
+          test "$ok" = 1
+
+      # Codes de sortie de zap-api-scan.py : 1 si une règle FAIL est
+      # déclenchée, 2 si une alerte reste en WARN, donc toute alerte non listée
+      # dans .zap/rules.tsv casse le job. Pour rendre le scan informatif au lieu
+      # de bloquant, ajouter -I à la commande ci-dessous.
+      #
+      # ZAP tourne dans son propre conteneur : --network host pour qu'il
+      # atteigne l'uvicorn du runner, et /zap/wrk monté sur un répertoire du
+      # workspace pour en ressortir les rapports. Le conteneur écrit sous un
+      # autre uid que le runner, d'où le chmod.
+      - name: OWASP ZAP
+        run: |
+          mkdir -p zap-report
+          cp .zap/rules.tsv zap-report/rules.tsv
+          chmod -R 777 zap-report
+          docker run --rm --network host \
+            -v "$PWD/zap-report:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-api-scan.py \
+              -t "$SCAN_TARGET/openapi.json" \
+              -f openapi \
+              -c rules.tsv \
+              -r rapport.html \
+              -w rapport.md \
+              -J rapport.json
+
+      - name: Récapitulatif
+        if: always()
+        run: |
+          {
+            echo "### OWASP ZAP — scan de l'API"
+            echo
+            cat zap-report/rapport.md || echo "(aucun rapport produit)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publier le rapport
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: |
+            zap-report/rapport.*
+            uvicorn.log
+          if-no-files-found: warn
