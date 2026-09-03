@@ -17,13 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
-<<<<<<< HEAD
 from app.core.config import check_cors_origins, get_cors_origins, get_jwt_secret
-from app.routers import alerts, auth, health, predictions, sites
-=======
-from app.core.config import get_jwt_secret
 from app.routers import alerts, auth, health, indicators, predictions, sites
->>>>>>> 4ea81ac (feat(indicators): serve ingestion freshness, degraded ratio and forecast error)
 from app.schemas.auth import UserOut
 
 # Version du contrat gelé dans enervision/docs/contracts/openapi-api.json.
