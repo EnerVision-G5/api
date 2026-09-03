@@ -9,17 +9,24 @@ La base, elle, reste réelle comme pour EV-11 : c'est elle qui décide du 404.
 """
 
 import json
+import logging
 from collections.abc import Callable, Iterator
 
 import httpx
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.models.prediction import Prediction
 from app.schemas.prediction import PredictionOut
 from tests.conftest import (
+    AMBIGUOUS_MODEL_VERSION,
+    KNOWN_MODEL_VERSION,
     SITE_UNKNOWN,
     SITE_WITH_READINGS,
+    UNKNOWN_MODEL_VERSION,
     assert_error_response,
 )
 
@@ -32,7 +39,7 @@ SERVING_BASE_URL = "http://serving-de-test:8000"
 # déclare nullables, et elles doivent traverser telles quelles.
 SERVING_RESPONSE = {
     "site_id": SITE_WITH_READINGS,
-    "model_version": "enervision_xgboost:3",
+    "model_version": KNOWN_MODEL_VERSION,
     "generated_at": "2026-09-03T08:00:00Z",
     "points": [
         {
@@ -98,6 +105,37 @@ def payload(site_id: str = SITE_WITH_READINGS, **extra: object) -> dict:
     return {"site_id": site_id, **extra}
 
 
+def responding(body: dict) -> Callable[[httpx.Request], httpx.Response]:
+    """Handler jouant une réponse 200 avec le corps donné."""
+    return lambda _: httpx.Response(200, json=body)
+
+
+@pytest.fixture
+async def clean_predictions(db_session: AsyncSession) -> AsyncSession:
+    """Vide la table prediction avant le test.
+
+    Les tests d'archivage écrivent, contrairement au reste de la suite : partir
+    d'une table vide les rend indépendants de leur ordre d'exécution et
+    rejouables sur une base déjà utilisée.
+    """
+    await db_session.execute(delete(Prediction))
+    await db_session.commit()
+    return db_session
+
+
+async def stored_points(session: AsyncSession) -> list[tuple]:
+    """Relit les prédictions archivées, hors de tout cache d'identité."""
+    await session.rollback()
+    rows = await session.execute(
+        select(
+            Prediction.site_id,
+            Prediction.ts_cible,
+            Prediction.consumption_kw_predite,
+        ).order_by(Prediction.ts_cible),
+    )
+    return list(rows)
+
+
 async def test_prediction_is_relayed_unchanged(
     api_client: AsyncClient,
     serving: ServingDouble,
@@ -113,7 +151,7 @@ async def test_prediction_is_relayed_unchanged(
     )
 
     body = response.json()
-    assert body["model_version"] == "enervision_xgboost:3"
+    assert body["model_version"] == KNOWN_MODEL_VERSION
     assert len(body["points"]) == 2
     assert body["points"][0]["lower_bound_kw"] == 120.0
     # Le point sans intervalle de confiance garde ses nulls.
@@ -271,3 +309,175 @@ async def test_prediction_requires_a_token(
     assert response.headers["WWW-Authenticate"] == "Bearer"
     assert_error_response(response.json())
     assert serving.called is False
+
+
+# --- Archivage en base -------------------------------------------------------
+#
+# L'archivage est volontairement partiel : la table prediction ne porte ni les
+# bornes de l'intervalle, ni model_version, ni generated_at. Ce qui suit
+# éprouve donc ce qui est archivable, et surtout que rien de tout cela ne peut
+# priver le client de sa réponse.
+
+
+async def test_prediction_is_stored(
+    api_client: AsyncClient,
+    serving: ServingDouble,
+    clean_predictions: AsyncSession,
+) -> None:
+    """Une prédiction servie est archivée, un enregistrement par point."""
+    response = await api_client.post(PREDICT_URL, json=payload())
+
+    assert response.status_code == 200
+    stored = await stored_points(clean_predictions)
+    assert len(stored) == 2
+    sites = {row[0] for row in stored}
+    assert sites == {SITE_WITH_READINGS}
+    assert [float(row[2]) for row in stored] == [131.5, 128.25]
+
+
+async def test_new_prediction_replaces_the_previous_one(
+    api_client: AsyncClient,
+    serving: ServingDouble,
+    clean_predictions: AsyncSession,
+) -> None:
+    """Un même instant cible réévalué garde la valeur la plus fraîche.
+
+    La contrainte d'unicité porte sur (modele_id, site_id, ts_cible) : sans
+    politique de conflit, le second appel échouerait. La plus récente gagne,
+    c'est celle que le dashboard affiche.
+    """
+    await api_client.post(PREDICT_URL, json=payload())
+
+    revised = {**SERVING_RESPONSE, "points": list(SERVING_RESPONSE["points"])}
+    revised["points"][0] = {**revised["points"][0], "predicted_consumption_kw": 140.0}
+    serving.responds(responding(revised))
+    response = await api_client.post(PREDICT_URL, json=payload())
+
+    assert response.status_code == 200
+    stored = await stored_points(clean_predictions)
+    assert len(stored) == 2
+    assert float(stored[0][2]) == 140.0
+
+
+@pytest.mark.parametrize(
+    ("case", "model_version"),
+    [
+        ("modele absent du registre", UNKNOWN_MODEL_VERSION),
+        ("version portee par deux modeles", AMBIGUOUS_MODEL_VERSION),
+    ],
+)
+async def test_unresolvable_model_is_served_but_not_stored(
+    api_client: AsyncClient,
+    serving: ServingDouble,
+    clean_predictions: AsyncSession,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+    model_version: str,
+) -> None:
+    """Modèle non résolvable : la prédiction part quand même, rien n'est archivé.
+
+    Le registre `modele` est alimenté par l'équipe Data, pas par l'API, et sa
+    clé unique est (nom, version) alors que le contrat ne transporte que la
+    version. Deviner le modèle serait pire que ne pas archiver.
+    """
+    serving.responds(responding({**SERVING_RESPONSE, "model_version": model_version}))
+
+    with caplog.at_level(logging.ERROR, logger="app.predictions_store"):
+        response = await api_client.post(PREDICT_URL, json=payload())
+
+    assert response.status_code == 200, case
+    assert response.json()["model_version"] == model_version
+    assert await stored_points(clean_predictions) == [], case
+    assert caplog.records, case
+    assert "non archivee" in caplog.text
+
+
+async def test_storage_failure_still_serves_the_prediction(
+    api_client: AsyncClient,
+    serving: ServingDouble,
+    clean_predictions: AsyncSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Écriture refusée par la base : réponse 200 quand même, échec journalisé.
+
+    La valeur dépasse le NUMERIC(10,2) de la colonne, ce qui provoque un vrai
+    refus du moteur plutôt qu'une panne simulée.
+    """
+    serving.responds(
+        responding(
+            {
+                **SERVING_RESPONSE,
+                "points": [
+                    {
+                        "timestamp": "2026-09-03T09:00:00Z",
+                        "predicted_consumption_kw": 999999999.99,
+                        "lower_bound_kw": None,
+                        "upper_bound_kw": None,
+                    },
+                ],
+            },
+        ),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="app.predictions_store"):
+        response = await api_client.post(PREDICT_URL, json=payload())
+
+    assert response.status_code == 200
+    assert response.json()["points"][0]["predicted_consumption_kw"] == 999999999.99
+    assert await stored_points(clean_predictions) == []
+    assert "Echec d'archivage" in caplog.text
+
+
+async def test_duplicate_points_do_not_break_the_response(
+    api_client: AsyncClient,
+    serving: ServingDouble,
+    clean_predictions: AsyncSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Deux points au même horodatage : la réponse part, l'échec est journalisé.
+
+    PostgreSQL refuse un ON CONFLICT DO UPDATE qui viserait deux fois la même
+    ligne dans un seul ordre. Rien n'oblige Serving à ne pas envoyer de
+    doublon, le cas est donc traité comme un échec d'archivage ordinaire.
+    """
+    duplicated = SERVING_RESPONSE["points"][0]
+    serving.responds(
+        responding({**SERVING_RESPONSE, "points": [duplicated, duplicated]}),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="app.predictions_store"):
+        response = await api_client.post(PREDICT_URL, json=payload())
+
+    assert response.status_code == 200
+    assert await stored_points(clean_predictions) == []
+    assert "Echec d'archivage" in caplog.text
+
+
+async def test_serving_failure_stores_nothing(
+    api_client: AsyncClient,
+    serving: ServingDouble,
+    clean_predictions: AsyncSession,
+) -> None:
+    """Pas de prévision, donc rien à archiver."""
+    serving.responds(fails_with_500)
+
+    response = await api_client.post(PREDICT_URL, json=payload())
+
+    assert response.status_code == 503
+    assert await stored_points(clean_predictions) == []
+
+
+async def test_empty_prediction_is_served_without_storing(
+    api_client: AsyncClient,
+    serving: ServingDouble,
+    clean_predictions: AsyncSession,
+) -> None:
+    """Série vide : rien à archiver, et le contrat l'autorise (points non vide
+    n'est pas une contrainte du schéma). La réponse part telle quelle."""
+    serving.responds(responding({**SERVING_RESPONSE, "points": []}))
+
+    response = await api_client.post(PREDICT_URL, json=payload())
+
+    assert response.status_code == 200
+    assert response.json()["points"] == []
+    assert await stored_points(clean_predictions) == []

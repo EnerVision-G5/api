@@ -19,7 +19,10 @@ les alertes sous JWT.
   TimescaleDB en SQLAlchemy asynchrone (asyncpg) ;
 - l'**authentification JWT** (ticket EV-12) : `POST /auth/token` délivre un
   jeton, les lectures l'exigent, et `require_role` est prête pour les futures
-  écritures. `GET /alerts` reste en `501`.
+  écritures ;
+- le **proxy des prédictions** (ticket EV-38) : `POST /api/v1/predict` relaie
+  la demande au service d'inférence et archive ce qui est archivable.
+  `GET /alerts` reste en `501`.
 
 ## Démarrer
 
@@ -62,6 +65,9 @@ uvicorn app.main:app --reload --port 8080
 | `app/schemas/auth.py` | `TokenResponse`, `UserOut` |
 | `app/models/user.py` | Modèle ORM `AppUser` (comptes locaux, rôles) |
 | `app/password.py` | Hachage argon2id (seul module à le manipuler) |
+| `app/predict_client.py` | Client HTTP du service d'inférence |
+| `app/predictions_store.py` | Archivage des prédictions servies |
+| `app/db/lookups.py` | Consultations de référentiel partagées (existence d'un site) |
 | `app/security.py` | JWT, `get_current_user`, `require_role` |
 | `app/routers/` | Routes, une par domaine, sans logique métier |
 | `alembic/` | Migrations |
@@ -173,6 +179,57 @@ ajouter un ferait dériver la spécification. Elle refuse en `403`, et non en
 
 Hors périmètre à ce stade : pas de rate limiting sur `/auth/token`, pas de
 jeton de rafraîchissement, aucune gestion des utilisateurs par l'API.
+
+## Prédictions (proxy)
+
+Le dashboard n'appelle plus le service d'inférence directement : il passe par
+`POST /api/v1/predict`, qui relaie vers Serving sur `ml_network` et rend la
+réponse **sans la transformer**.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/predict      -H "Authorization: Bearer $TOKEN"      -H 'Content-Type: application/json'      -d '{"site_id": "SITE001", "horizon_hours": 24}'
+```
+
+| Variable | Rôle |
+|---|---|
+| `PREDICT_URL` | adresse de Serving. Le chemin `/api/v1/predict` vient de son contrat et n'est pas configurable. Sans valeur, la route répond `503` |
+| `PREDICT_TIMEOUT_SECONDS` | délai total de l'appel, 3 s par défaut |
+
+### Séquence et codes d'erreur
+
+1. authentification (`401` sans jeton valide) ;
+2. validation du corps (`422`) ;
+3. **vérification du site en base** (`404`) — Serving n'est pas appelé, un site
+   inconnu est une erreur du client et le message est celui des routes de
+   lecture ;
+4. appel de Serving (`503` sur délai dépassé, erreur de connexion, réponse non
+   `200`, ou réponse `200` hors contrat) ;
+5. archivage au mieux, puis réponse.
+
+Le `503` porte un message générique : le détail de la panne va dans les logs,
+pas au client.
+
+### Archivage partiel, et pourquoi
+
+La table `prediction` ne porte **ni** `lower_bound_kw`, **ni**
+`upper_bound_kw`, **ni** `model_version`, **ni** `generated_at`. Sont archivés
+le site, l'horodatage cible, la valeur prédite et le modèle résolu. C'est une
+décision d'équipe assumée : persistance minimale, sans migration de schéma.
+
+L'archivage est **au mieux**. `store_prediction` ne lève jamais : la prédiction
+est déjà obtenue et due au client, aucun échec d'écriture ne la lui retire.
+Chaque échec est journalisé.
+
+Deux cas où rien n'est archivé alors que la réponse part normalement :
+
+- **modèle absent du registre** — `modele` est alimenté par l'équipe Data,
+  jamais par l'API, et reste vide à ce jour ;
+- **résolution ambiguë** — la clé unique de `modele` est `(nom, version)` et le
+  contrat ne transporte que `model_version`. Si deux modèles partagent la
+  version, en choisir un serait deviner.
+
+Un même instant cible réévalué remplace la valeur précédente : la prédiction la
+plus fraîche est celle que le dashboard affiche.
 
 ## Migrations
 

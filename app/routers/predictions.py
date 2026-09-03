@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.db.lookups import ensure_site_exists
 from app.predict_client import ServingUnavailableError, request_prediction
+from app.predictions_store import store_prediction
 from app.schemas.common import ErrorResponse
 from app.schemas.prediction import PredictionOut, PredictionRequest
 from app.security import AuthSession, CurrentUser
@@ -67,5 +68,10 @@ async def create_prediction(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=SERVICE_UNAVAILABLE,
         ) from error
+
+    # Archivage au mieux : la prédiction est déjà due au client, un échec
+    # d'écriture ne la lui retire pas. store_prediction ne lève jamais et dit
+    # dans les logs ce qu'elle n'a pas pu faire.
+    await store_prediction(session, prediction)
 
     return prediction

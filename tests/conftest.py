@@ -52,6 +52,7 @@ from app.db.base import Base  # noqa: E402
 from app.db.session import get_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.energy import Mesure, Site  # noqa: E402
+from app.models.prediction import Modele  # noqa: E402
 from app.models.user import LOCAL_PROVIDER, AppUser  # noqa: E402
 from app.password import hash_password  # noqa: E402
 
@@ -98,6 +99,19 @@ weak_hasher = PasswordHasher(time_cost=1, memory_cost=8192, parallelism=1)
 UNKNOWN_USERNAME = "personne"
 
 TOKEN_URL = "/api/v1/auth/token"
+
+# Registre des modèles. Le contrat de prédiction ne transporte que
+# model_version : une version ne désigne un modèle que si elle est unique dans
+# la table, la clé portant sur (nom, version).
+KNOWN_MODEL_VERSION = "3"
+KNOWN_MODEL_NAME = "enervision_xgboost"
+
+# Deux modèles partagent cette version : la résolution est alors ambiguë et
+# l'archivage doit être abandonné plutôt que d'en choisir un.
+AMBIGUOUS_MODEL_VERSION = "7"
+
+# Version qu'aucune ligne ne porte, cas du registre non alimenté.
+UNKNOWN_MODEL_VERSION = "enervision_xgboost:99"
 
 
 def _sites() -> list[Site]:
@@ -175,6 +189,20 @@ def _users() -> list[AppUser]:
             role="reader",
             password_hash=weak_hasher.hash(TEST_PASSWORD),
         ),
+    ]
+
+
+def _models() -> list[Modele]:
+    """Registre des modèles de test.
+
+    Le registre est alimenté par l'équipe Data en exploitation, jamais par
+    l'API. Ces lignes servent à éprouver les trois cas de résolution :
+    unique, ambigu, absent.
+    """
+    return [
+        Modele(nom=KNOWN_MODEL_NAME, version=KNOWN_MODEL_VERSION, actif=True),
+        Modele(nom="baseline", version=AMBIGUOUS_MODEL_VERSION, actif=False),
+        Modele(nom="enervision_lstm", version=AMBIGUOUS_MODEL_VERSION, actif=False),
     ]
 
 
@@ -358,6 +386,7 @@ async def seeded_database(engine) -> None:
     async with factory() as session:
         session.add_all(_sites())
         session.add_all(_users())
+        session.add_all(_models())
         await session.flush()
         session.add_all(_readings())
         await session.commit()

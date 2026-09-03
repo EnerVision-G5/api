@@ -71,10 +71,35 @@ async def columns_of(engine: AsyncEngine, table: str) -> set[str]:
         return {row[0] for row in result}
 
 
+MODELE_COLUMNS = {
+    "modele_id",
+    "nom",
+    "version",
+    "mlflow_run_id",
+    "date_entrainement",
+    "actif",
+    "created_at",
+}
+
+# Ce que cette table NE porte PAS, alors que le contrat de prédiction le
+# transporte : model_version, generated_at, lower_bound_kw, upper_bound_kw.
+# L'archivage est donc partiel, décision d'équipe assumée (EV-38).
+PREDICTION_COLUMNS = {
+    "prediction_id",
+    "modele_id",
+    "site_id",
+    "ts_cible",
+    "consumption_kw_predite",
+    "created_at",
+}
+
+
 async def test_schema_conformite(engine: AsyncEngine, seeded_database: None) -> None:
     assert await columns_of(engine, "site") == SITE_COLUMNS
     assert await columns_of(engine, "mesure") == MESURE_COLUMNS
     assert await columns_of(engine, "app_user") == APP_USER_COLUMNS
+    assert await columns_of(engine, "modele") == MODELE_COLUMNS
+    assert await columns_of(engine, "prediction") == PREDICTION_COLUMNS
 
 
 async def test_role_est_contraint(engine: AsyncEngine, seeded_database: None) -> None:
