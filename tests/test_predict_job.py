@@ -17,6 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import get_settings
 from app.jobs import predict_refresh
 from app.models.prediction import Modele, Prediction
+from app.predict_client import (
+    ServingNotReadyError,
+    ServingUnavailableError,
+    request_prediction,
+)
 from tests.conftest import (
     AMBIGUOUS_MODEL_VERSION,
     EXTRA_ACTIVE_SITE_IDS,
@@ -535,3 +540,81 @@ async def test_main_returns_the_exit_code_and_releases_the_engine(
 
     assert code == 0
     assert disposed == [True]
+
+
+class TestRegistreVide:
+    """Un registre vide n'est pas un service en panne.
+
+    Les deux sortaient jusqu'ici sous la même exception, et l'astreinte
+    partait donc chercher une panne d'infrastructure là où il n'y avait
+    simplement rien à servir — l'état normal du projet tant qu'aucun modèle
+    n'est promu.
+
+    La distinction porte sur le CODE DE STATUT et jamais sur le texte du
+    message : c'est le contrat de predict qui déclare le 503, un message est
+    libre de changer sans PR de contrat.
+    """
+
+    async def test_un_503_sort_en_serving_not_ready(
+        self,
+        serving: ServingDouble,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def build_client() -> httpx.AsyncClient:
+            return httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        503,
+                        json={"detail": "Aucun modele resolu par le registre."},
+                    ),
+                ),
+            )
+
+        monkeypatch.setattr("app.predict_client.build_client", build_client)
+        with pytest.raises(ServingNotReadyError):
+            await request_prediction(SITE_WITH_READINGS, 24)
+
+    async def test_une_autre_erreur_reste_indifferenciee(
+        self,
+        serving: ServingDouble,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Un 500 est un incident : il ne doit pas emprunter le chemin du mode
+        # dégradé, qui existe pour un registre vide.
+        def build_client() -> httpx.AsyncClient:
+            return httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(500, text="boom"),
+                ),
+            )
+
+        monkeypatch.setattr("app.predict_client.build_client", build_client)
+        with pytest.raises(ServingUnavailableError) as raised:
+            await request_prediction(SITE_WITH_READINGS, 24)
+        assert not isinstance(raised.value, ServingNotReadyError)
+
+    async def test_le_mode_degrade_est_rattrape_comme_une_panne(self) -> None:
+        # Sous-classe, donc tout appelant qui ne veut pas distinguer les deux
+        # continue de fonctionner sans changement. C'est ce qui permet
+        # d'ajouter la distinction sans toucher au job.
+        assert issubclass(ServingNotReadyError, ServingUnavailableError)
+
+    async def test_un_registre_vide_narchive_rien(
+        self,
+        serving: ServingDouble,
+        clean_predictions: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def build_client() -> httpx.AsyncClient:
+            return httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(503, json={"detail": "vide"}),
+                ),
+            )
+
+        monkeypatch.setattr("app.predict_client.build_client", build_client)
+        code = await predict_refresh.refresh_all()
+        # La tournée échoue quand même : rien n'a été archivé, et le dire est
+        # le rôle du code de sortie. C'est le NIVEAU de journal qui change.
+        assert code == 1
+        assert await count_predictions(clean_predictions) == 0

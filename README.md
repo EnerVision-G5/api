@@ -22,7 +22,11 @@ les alertes sous JWT.
   écritures ;
 - les **prédictions** (ticket EV-38) : un job planifié interroge le service
   d'inférence et archive le résultat, que
-  `GET /api/v1/sites/{site_id}/predictions` sert au dashboard.
+  `GET /api/v1/sites/{site_id}/predictions` sert au dashboard ;
+- les **indicateurs de confiance** (ticket EV-18) : `GET /api/v1/indicators` et
+  `GET /api/v1/sites/{site_id}/indicators` publient la fraîcheur de la dernière
+  ingestion, la part de mesures dégradées et l'écart entre prévision et
+  consommation réelle.
   `GET /alerts` reste en `501`.
 
 ## Démarrer
@@ -60,7 +64,7 @@ uvicorn app.main:app --reload --port 8080
 | `app/main.py` | Application FastAPI, `CONTRACT_VERSION`, préfixe `/api/v1` |
 | `app/core/config.py` | Configuration (`pydantic-settings`, lecture `.env`) |
 | `app/db/` | `Base` ORM et session asynchrone (`get_db`, moteur asyncpg) |
-| `app/models/energy.py` | Modèles ORM `Site` et `Mesure`, reflet du schéma d'infra |
+| `app/models/energy.py` | Modèles ORM `Site`, `Mesure` et `IngestionEtat`, reflet du schéma d'infra |
 | `app/schemas/common.py` | `ErrorResponse`, `PaginationMeta`, `DataQuality` |
 | `app/schemas/energy.py` | `SiteOut`, `EnergyReadingOut`, `ReadingsPage`, `AlertOut` |
 | `app/schemas/auth.py` | `TokenResponse`, `UserOut` |
@@ -69,6 +73,8 @@ uvicorn app.main:app --reload --port 8080
 | `app/jobs/predict_refresh.py` | Job de rafraîchissement des prédictions |
 | `app/predict_client.py` | Client HTTP du service d'inférence |
 | `app/predictions_store.py` | Archivage des prédictions |
+| `app/schemas/indicators.py` | DTO des indicateurs de confiance |
+| `app/services/indicators.py` | Agrégats SQL des trois indicateurs |
 | `app/timewindow.py` | Fenêtre de temps partagée par les routes paginées |
 | `app/db/lookups.py` | Consultations de référentiel partagées |
 | `app/security.py` | JWT, `get_current_user`, `require_role` |
@@ -266,6 +272,136 @@ client demande « que prévoit-on pour telle période ». Il y a une ligne par
 modèle et par instant cible, celle de la prévision la plus fraîche ; deux
 modèles distincts prédisant le même instant donnent deux lignes, que leur
 `model_version` distingue.
+
+## Indicateurs de confiance
+
+Trois chiffres qualifient la donnée que l'écran affiche : la **fraîcheur de la
+dernière ingestion**, la **part de mesures dégradées**, et l'**écart entre
+prévision et consommation réelle** — ce dernier servant de détecteur de dérive
+côté exploitation.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8080/api/v1/sites/SITE001/indicators?window_hours=24"
+
+# Les sept sites d'un coup, pour le sélecteur de site
+curl -s -H "Authorization: Bearer $TOKEN" \
+     "http://localhost:8080/api/v1/indicators?window_hours=24"
+```
+
+La collection est à `/api/v1/indicators` et **non** sous `/sites`. FastAPI
+résout les routes dans l'ordre d'enregistrement : `/sites/{site_id}` est
+déclaré par `routers/sites.py`, inclus avant, et un chemin littéral sous
+`/sites` serait avalé par lui — la réponse serait `404 Site inconnu :
+indicators`. Une route de premier niveau règle la question sans dépendre d'un
+ordre d'`include_router`.
+
+Les trois blocs sont **toujours présents**, avec des champs nullables. Une
+prévision absente n'efface pas la fraîcheur d'ingestion, et un compte à zéro
+dit déjà ce qu'un bloc nul aurait dit.
+
+### Fraîcheur : pourquoi `inserted_at` ne suffit pas
+
+`mesure.inserted_at` répond tant qu'il y a des lignes. Un capteur mort en
+produit encore — nulles, avec leurs motifs — donc `max(inserted_at)` avance.
+Mais un collecteur arrêté, une source en 500 ou une base injoignable n'en
+produisent aucune : l'agrégat se fige exactement comme si le site avait cessé
+d'exister. **Aucune requête sur `mesure` ne distingue « la collecte a tourné
+et il n'y avait rien » de « la collecte n'a pas tourné ».**
+
+Le bloc `ingestion` croise donc deux sources :
+
+| Champ | Ce qu'il dit |
+|---|---|
+| `last_measure_at`, `measure_age_seconds` | la donnée décrit-elle encore le présent |
+| `last_ingested_at`, `ingestion_lag_seconds` | la chaîne suit-elle — un collecteur arrêté et un collecteur qui rattrape donnent le même âge et deux retards très différents |
+| `collector` | ce que le collecteur dit de lui-même, lu dans `ingestion_etat` |
+
+`collector` est **nul** quand aucune ligne n'existe pour le site : le
+collecteur n'a jamais tourné dessus, ou la migration
+`06_ingestion_etat.sql` n'est pas appliquée. Les deux se disent « je ne sais
+pas », jamais « tout va bien ». Quand il est présent, `last_attempt_at` et
+`last_success_at` portent le diagnostic : égaux tout va bien, écartés la
+collecte tourne et échoue, tous deux figés le collecteur ne tourne plus.
+
+### Mesures dégradées : le piège du `good` par défaut
+
+Une mesure est dégradée quand la source ou l'ETL l'a qualifiée `degraded` ou
+`critical`, quand sa valeur a dû être reconstruite, ou quand ses motifs
+d'absence nomment une panne capteur. **C'est la définition de l'ETL, pas une
+seconde définition écrite ici** (`etl/quality.py` du repo predict) : l'API
+compte, elle ne juge pas.
+
+Les motifs sont reconnus dans **deux vocabulaires**, et ce n'est pas de la
+tolérance : la source nomme le capteur tombé (`consumption_sensor_failure`),
+l'ETL nomme la colonne restée nulle quand la source n'a rien déclaré
+(`consumption_kw:undeclared`). N'en reconnaître qu'un laisserait passer
+exactement la panne que personne n'a étiquetée.
+
+`qualified_ratio` est le chiffre le plus important du bloc. `data_quality` est
+`NOT NULL DEFAULT 'good'` : le collecteur retombe sur le défaut quand la source
+se tait, et l'ETL repose la vraie qualification à son passage. Sans cette part,
+une journée fraîchement collectée afficherait **0 % de dégradation** et le site
+paraîtrait parfait — l'inverse de ce que l'indicateur doit dire.
+
+Une mesure écartée par un analyste (`mesure_exclu`) **n'entre pas** dans le
+compte : l'exclusion est un jugement humain sur une valeur aberrante, la
+dégradation est un fait capteur. Les confondre rendrait le chiffre
+indéfendable en recette.
+
+### Écart prévision / réel
+
+La comparaison porte sur les prévisions **archivées**, celles qui ont réellement
+été servies. Ce n'est pas le même nombre que `python -m training.drift` du repo
+predict, qui mesure l'erreur du modèle à un pas sur les décalages réels : celle-là
+juge le modèle, celle-ci juge ce que le client a reçu, et elle sera toujours la
+moins flatteuse des deux. Les afficher sous le même libellé serait un contresens.
+
+La règle d'appariement décide du chiffre autant que les données, elle est donc
+publiée : les mesures sont **moyennées par heure**, les prévisions rattachées à
+l'heure de leur horodatage cible. Une heure sans aucune mesure de puissance
+**brute** ne forme pas de paire — comparer une prévision à une valeur imputée
+mesurerait la dérive de l'ETL, pas celle du modèle. `paired_points` dit combien
+d'heures ont réellement compté.
+
+Pas de MAPE : elle explose quand la consommation approche zéro, et une seule
+heure creuse suffirait à rendre l'indicateur illisible. `bias_kw`, signé, la
+remplace utilement en donnant la direction de l'erreur, et
+`within_bounds_ratio` mesure la tenue de l'intervalle de confiance sur les
+seules prévisions qui en annonçaient un.
+
+`drift` compare l'erreur à une **part** de la consommation moyenne, jamais à des
+kilowatts : 20 kW d'écart n'ont pas le même sens sur un bureau de 200 kW et sur
+une usine de 1000. Un site à l'arrêt ne dérive pas — une moyenne nulle donnerait
+un seuil de zéro kilowatt que la moindre erreur dépasserait.
+
+### Seuils
+
+| Variable | Défaut | Ce qu'elle décide |
+|---|---|---|
+| `STALE_THRESHOLD_SECONDS` | 180 | Âge au-delà duquel l'ingestion est en retard |
+| `DEGRADED_RATIO_THRESHOLD` | 0.20 | Part de dégradation compromettant la fiabilité |
+| `DRIFT_MAE_RATIO` | 0.15 | Part de la consommation moyenne tolérée en erreur |
+
+En configuration et non en constantes : ce sont des réglages de pilote, que le
+client ajuste après avoir vu ses propres données.
+
+Chaque seuil est **republié dans la réponse**, à côté de la valeur qu'il juge.
+Sans cela le dashboard le redéclarerait, et deux vérités divergeraient sans que
+rien ne le signale — c'est exactement ce qui s'était produit sur la fraîcheur, à
+120 s côté front contre 180 s côté collecteur (`collector.lag_warning_s`). Les
+180 s d'ici sont cette valeur : les deux doivent rester alignées.
+
+### Migrations requises
+
+Les deux ajouts d'EV-18 vivent dans le repo infra et doivent être appliqués,
+sans quoi l'endpoint échoue sur une colonne ou une table absente :
+
+- `infra/enervision-db/initdb/06_ingestion_etat.sql`
+- `infra/enervision-db/initdb/07_mesure_quality_source.sql`
+
+`ingestion_etat` est écrite par le **collecteur** du repo predict, jamais par
+l'API : elle décrit une collecte que l'API ne fait pas.
 
 ## Migrations
 
