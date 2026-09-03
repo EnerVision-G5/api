@@ -17,13 +17,13 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
 from app.core.config import get_jwt_secret
-from app.routers import alerts, auth, health, sites
+from app.routers import alerts, auth, health, predictions, sites
 from app.schemas.auth import UserOut
 
 # Version du contrat gelé dans enervision/docs/contracts/openapi-api.json.
 # Incrémentée en semver : patch pour une description, minor pour un champ
 # optionnel ajouté, major pour un champ retiré ou renommé.
-CONTRACT_VERSION = "1.0.0"
+CONTRACT_VERSION = "1.1.0"
 
 API_PREFIX = "/api/v1"
 
@@ -77,6 +77,7 @@ def validation_error_handler(
 app.include_router(health.router, prefix=API_PREFIX)
 app.include_router(auth.router, prefix=API_PREFIX)
 app.include_router(sites.router, prefix=API_PREFIX)
+app.include_router(predictions.router, prefix=API_PREFIX)
 app.include_router(alerts.router, prefix=API_PREFIX)
 
 
