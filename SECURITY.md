@@ -2,12 +2,13 @@
 
 La chaîne de sécurité du projet est décrite par ADR-012 : Grype sur l'image
 livrée, OWASP ZAP sur l'API en fonctionnement, SonarQube sur le code. Les deux
-premiers tournent dans `ci.yml` et sont **bloquants** : une alerte fait échouer
-la CI.
+premiers tournent dans `ci.yml`.
 
-Ce document est le seul endroit où une alerte peut être écartée sciemment.
-Écarter une alerte en posant `continue-on-error` sur un job la rendrait
-invisible sans que personne ne l'ait décidé, et sans date de réexamen.
+Ils sont **informatifs** : sur décision d'équipe, `continue-on-error: true` les
+laisse visibles en échec sans faire échouer la CI. La contrepartie est ce
+document : une alerte non traitée doit y figurer, avec sa raison et sa date de
+réexamen. Sans cela, un scan durablement rouge cesse d'être lu, et une vraie
+alerte se noie dans celles qu'on a choisi d'ignorer.
 
 ## Dérogations en cours
 
@@ -21,6 +22,7 @@ invisible sans que personne ne l'ait décidé, et sans date de réexamen.
 | Ouverte le | 3 septembre 2026 |
 | Expire | **J10** — à réexaminer à cette échéance, sans report tacite |
 | Décision | dérogation, la montée est techniquement impossible en l'état |
+| Scan | non bloquant, l'alerte reste visible dans la CI |
 
 **Pourquoi la montée n'est pas appliquée.** `fastapi 0.121.2` déclare
 `starlette<0.50.0,>=0.40.0`. Les versions qui corrigent ces deux CVE sont
@@ -55,6 +57,17 @@ qu'une application exposant des fichiers statiques ou des sessions signées :
 l'API sert du JSON derrière Traefik, sans `StaticFiles` ni `SessionMiddleware`
 (vérifiable dans `app/main.py`). Cette lecture **atténue** le risque, elle ne
 l'annule pas, et elle n'a pas été validée par une analyse d'exploitabilité.
+
+## Pourquoi les scans ne bloquent pas
+
+Une CVE de l'image de base peut apparaître entre deux exécutions sans qu'aucune
+ligne du dépôt ait changé, et sa correction dépend parfois d'une contrainte de
+version qu'on ne maîtrise pas — le cas de starlette ci-dessus. Bloquer chaque
+PR sur un événement extérieur au code qu'elle porte arrêterait le projet sans
+rendre l'image plus sûre.
+
+Le prix de ce choix : c'est la relecture de ce document, et non la CI, qui
+garantit qu'une alerte est traitée. À vérifier à chaque réexamen de dérogation.
 
 ## Ce qui n'est pas une dérogation
 
