@@ -77,7 +77,7 @@ jobs:
           docker run -d --name api-smoke -p 8080:8080 \
             -e ENVIRONMENT=production \
             -e DATABASE_URL='postgresql+asyncpg://smoke:smoke@db:5432/smoke' \
-            -e SECRET_KEY='ci-smoke-value-not-a-real-secret' \
+            -e JWT_SECRET='ci-smoke-throwaway-not-a-real-jwt-secret-0123456789' \
             "$ref"
           ok=0
           for _ in $(seq 1 30); do
