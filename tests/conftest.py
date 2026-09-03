@@ -61,7 +61,7 @@ from app.core.config import get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402
 from app.db.session import get_db  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models.energy import Mesure, Site  # noqa: E402
+from app.models.energy import IngestionEtat, Mesure, Site  # noqa: E402
 from app.models.prediction import Modele, Prediction  # noqa: E402
 from app.models.user import LOCAL_PROVIDER, AppUser  # noqa: E402
 from app.password import hash_password  # noqa: E402
@@ -240,6 +240,11 @@ def _readings() -> list[Mesure]:
     une mesure complète, une mesure trouée reconstruite par report de la
     dernière valeur connue, une mesure massivement trouée que rien ne permet de
     reconstruire, et une mesure reconstruite par interpolation.
+
+    Toutes portent quality_source="etl" : leurs colonnes d'imputation sont
+    renseignées, donc l'ETL est passé dessus. Les laisser au défaut "source"
+    décrirait un état impossible — une mesure imputée par un ETL qui ne
+    l'aurait pas qualifiée.
     """
     return [
         # Mesure complète, rien à imputer.
@@ -257,6 +262,7 @@ def _readings() -> list[Mesure]:
             data_quality="good",
             consumption_kw_imputed=Decimal("120.50"),
             imputation_method="none",
+            quality_source="etl",
         ),
         # Capteur de puissance muet : la brute reste NULL, l'imputée reporte
         # la dernière valeur connue.
@@ -274,6 +280,7 @@ def _readings() -> list[Mesure]:
             data_quality="partial",
             consumption_kw_imputed=Decimal("120.50"),
             imputation_method="locf",
+            quality_source="etl",
         ),
         # Perte réseau : rien d'exploitable, donc aucune imputation.
         Mesure(
@@ -294,6 +301,7 @@ def _readings() -> list[Mesure]:
             data_quality="critical",
             consumption_kw_imputed=None,
             imputation_method="none",
+            quality_source="etl",
         ),
         # Trou encadré par deux valeurs connues : interpolation.
         Mesure(
@@ -310,6 +318,7 @@ def _readings() -> list[Mesure]:
             data_quality="partial",
             consumption_kw_imputed=Decimal("123.00"),
             imputation_method="interpolation",
+            quality_source="etl",
         ),
         Mesure(
             site_id=SITE_WITH_READINGS,
@@ -325,6 +334,7 @@ def _readings() -> list[Mesure]:
             data_quality="good",
             consumption_kw_imputed=Decimal("125.50"),
             imputation_method="none",
+            quality_source="etl",
         ),
         # Second site, aux mêmes horodatages : vérifie que le filtre par site
         # isole bien les séries.
@@ -342,6 +352,7 @@ def _readings() -> list[Mesure]:
             data_quality="good",
             consumption_kw_imputed=Decimal("640.00"),
             imputation_method="none",
+            quality_source="etl",
         ),
         Mesure(
             site_id=SITE_OTHER,
@@ -357,6 +368,7 @@ def _readings() -> list[Mesure]:
             data_quality="good",
             consumption_kw_imputed=Decimal("642.20"),
             imputation_method="none",
+            quality_source="etl",
         ),
     ]
 
@@ -530,3 +542,248 @@ def auth_disabled(monkeypatch: pytest.MonkeyPatch):
     yield
     monkeypatch.setenv("AUTH_ENABLED", "true")
     get_settings.cache_clear()
+
+
+# --- Indicateurs de confiance (EV-18) ---------------------------------------
+#
+# Ces deux sites sont hors du seed global, comme extra_active_sites, et leurs
+# horodatages sont RELATIFS à maintenant — contrairement au reste du jeu de
+# données, et pour une raison de fond : les indicateurs mesurent un âge, en
+# comparant la donnée à l'instant de l'appel. Un jeu figé les ferait tous
+# répondre « en retard » quel que soit le code.
+#
+# L'ancrage est fait sur des heures pleines passées : les prévisions sont
+# rattachées à l'heure de leur horodatage cible, et des mesures posées à
+# l'aveugle autour de « maintenant » basculeraient d'un seau à l'autre selon
+# la minute d'exécution.
+
+# Site collecté à l'instant, avec ses prévisions archivées.
+FRESH_SITE = "SITE008"
+
+# Site connu du référentiel, jamais collecté avec succès : aucune mesure, et
+# un état de collecte en échec. C'est la panne que `mesure` ne peut pas dire.
+NEVER_COLLECTED_SITE = "SITE009"
+
+INDICATOR_SITE_IDS = (FRESH_SITE, NEVER_COLLECTED_SITE)
+
+# Comptes attendus de FRESH_SITE sur une fenêtre de 24 h.
+FRESH_TOTAL = 7
+FRESH_DEGRADED = 2
+FRESH_QUALIFIED = 6
+FRESH_SENSOR_FAILURES = 1
+FRESH_IMPUTED = 1
+
+# Écart attendu : deux heures appariées, dont une seule portait un intervalle.
+FRESH_PAIRED_POINTS = 2
+FRESH_MAE_KW = 10.0
+FRESH_BIAS_KW = 0.0
+FRESH_MEAN_ACTUAL_KW = 155.0
+
+# Échecs consécutifs de NEVER_COLLECTED_SITE, au-delà de tout à-coup.
+NEVER_COLLECTED_FAILURES = 3
+
+
+def _indicator_sites() -> list[Site]:
+    """Les deux sites que les tests d'indicateurs ajoutent au référentiel."""
+    return [
+        Site(
+            site_id=site_id,
+            site_type="office",
+            site_name=f"Site d'indicateurs {site_id}",
+            location="Nantes, France",
+            capacity_kw=Decimal("300.00"),
+            status="active",
+        )
+        for site_id in INDICATOR_SITE_IDS
+    ]
+
+
+def _fresh_readings(now: datetime, first_hour: datetime) -> list[Mesure]:
+    """Sept mesures couvrant chaque compte de l'indicateur de qualité.
+
+    Deux heures pleines pour l'appariement avec les prévisions, plus une
+    mesure posée à `now` : c'est elle qui rend le site frais, et sans elle
+    aucun test ne distinguerait un site à jour d'un site en retard.
+    """
+    second_hour = first_hour + timedelta(hours=1)
+    return [
+        # Heure 1 : moyenne des puissances brutes = (100 + 110 + 120) / 3.
+        Mesure(
+            site_id=FRESH_SITE,
+            timestamp=first_hour + timedelta(minutes=10),
+            consumption_kw=Decimal("100.00"),
+            null_reasons=[],
+            data_quality="good",
+            consumption_kw_imputed=Decimal("100.00"),
+            imputation_method="none",
+            quality_source="etl",
+        ),
+        Mesure(
+            site_id=FRESH_SITE,
+            timestamp=first_hour + timedelta(minutes=20),
+            consumption_kw=Decimal("110.00"),
+            null_reasons=[],
+            data_quality="good",
+            consumption_kw_imputed=Decimal("110.00"),
+            imputation_method="none",
+            quality_source="etl",
+        ),
+        # Panne capteur déclarée par la source, dans SON vocabulaire.
+        Mesure(
+            site_id=FRESH_SITE,
+            timestamp=first_hour + timedelta(minutes=30),
+            consumption_kw=None,
+            null_reasons=["consumption_sensor_failure"],
+            data_quality="critical",
+            consumption_kw_imputed=None,
+            imputation_method="none",
+            quality_source="etl",
+        ),
+        # Valeur reconstruite : dégradée sans être qualifiée critical, et sans
+        # motif de panne capteur. C'est le cas qu'aucun des deux autres
+        # symptômes de `_is_degraded` n'attraperait.
+        Mesure(
+            site_id=FRESH_SITE,
+            timestamp=first_hour + timedelta(minutes=40),
+            consumption_kw=None,
+            null_reasons=["consumption_kw:sensor_timeout"],
+            data_quality="partial",
+            consumption_kw_imputed=Decimal("105.00"),
+            imputation_method="locf",
+            quality_source="etl",
+        ),
+        # Collectée mais pas encore qualifiée : data_quality vaut good parce
+        # que c'est le défaut de la colonne, pas parce que l'ETL l'a établi.
+        Mesure(
+            site_id=FRESH_SITE,
+            timestamp=first_hour + timedelta(minutes=50),
+            consumption_kw=Decimal("120.00"),
+            null_reasons=[],
+            data_quality="good",
+            consumption_kw_imputed=None,
+            imputation_method="none",
+            quality_source="source",
+        ),
+        # Heure 2 : une seule mesure, donc moyenne = 200.
+        Mesure(
+            site_id=FRESH_SITE,
+            timestamp=second_hour + timedelta(minutes=10),
+            consumption_kw=Decimal("200.00"),
+            null_reasons=[],
+            data_quality="good",
+            consumption_kw_imputed=Decimal("200.00"),
+            imputation_method="none",
+            quality_source="etl",
+        ),
+        # Heure courante, sans prévision en face : elle ne forme pas de paire.
+        Mesure(
+            site_id=FRESH_SITE,
+            timestamp=now,
+            consumption_kw=Decimal("210.00"),
+            null_reasons=[],
+            data_quality="good",
+            consumption_kw_imputed=Decimal("210.00"),
+            imputation_method="none",
+            quality_source="etl",
+        ),
+    ]
+
+
+def _fresh_predictions(modele_id: int, first_hour: datetime) -> list[Prediction]:
+    """Trois prévisions, dont une seule sans mesure en face.
+
+    La troisième est délibérément posée sur une heure vide : la jointure est
+    interne, et une prévision sans mesure ne doit pas peser zéro dans une
+    moyenne — elle doit ne pas exister.
+    """
+    return [
+        # Erreur +10 kW contre une moyenne réelle de 110, dans les bornes.
+        Prediction(
+            modele_id=modele_id,
+            site_id=FRESH_SITE,
+            ts_cible=first_hour,
+            consumption_kw_predite=Decimal("120.00"),
+            lower_bound_kw=Decimal("100.00"),
+            upper_bound_kw=Decimal("130.00"),
+            generated_at=first_hour,
+        ),
+        # Erreur -10 kW contre 200, sans intervalle : la version servie ne
+        # déclarait pas sa dispersion.
+        Prediction(
+            modele_id=modele_id,
+            site_id=FRESH_SITE,
+            ts_cible=first_hour + timedelta(hours=1),
+            consumption_kw_predite=Decimal("190.00"),
+            lower_bound_kw=None,
+            upper_bound_kw=None,
+            generated_at=first_hour,
+        ),
+        Prediction(
+            modele_id=modele_id,
+            site_id=FRESH_SITE,
+            ts_cible=first_hour - timedelta(hours=1),
+            consumption_kw_predite=Decimal("500.00"),
+            lower_bound_kw=None,
+            upper_bound_kw=None,
+            generated_at=first_hour,
+        ),
+    ]
+
+
+def _collector_states(now: datetime) -> list[IngestionEtat]:
+    """Les deux états de collecte que l'indicateur doit savoir raconter."""
+    return [
+        IngestionEtat(
+            site_id=FRESH_SITE,
+            last_attempt_at=now,
+            last_success_at=now,
+            last_rows=1,
+            last_data_lag_s=Decimal("12.50"),
+            consecutive_failures=0,
+            last_error=None,
+            source="poller",
+        ),
+        # Le collecteur tourne et échoue : dernier essai récent, aucun succès.
+        # Sans cette ligne, ce site serait indiscernable d'un site que
+        # personne n'a jamais demandé à collecter.
+        IngestionEtat(
+            site_id=NEVER_COLLECTED_SITE,
+            last_attempt_at=now,
+            last_success_at=None,
+            last_rows=0,
+            last_data_lag_s=None,
+            consecutive_failures=NEVER_COLLECTED_FAILURES,
+            last_error="SourceError: 503 sur /current",
+            source="poller",
+        ),
+    ]
+
+
+@pytest.fixture
+async def indicator_sites(db_session: AsyncSession, known_model_id: int):
+    """Pose les deux sites d'indicateurs, puis les retire entièrement.
+
+    Le nettoyage suit l'ordre des clés étrangères : prédictions et état de
+    collecte d'abord, mesures ensuite, sites enfin. Les tests d'EV-11 comptent
+    le référentiel au site près.
+    """
+    now = datetime.now(UTC)
+    first_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+
+    db_session.add_all(_indicator_sites())
+    await db_session.flush()
+    db_session.add_all(_fresh_readings(now, first_hour))
+    db_session.add_all(_fresh_predictions(known_model_id, first_hour))
+    db_session.add_all(_collector_states(now))
+    await db_session.commit()
+
+    yield now
+
+    for statement in (
+        delete(Prediction).where(Prediction.site_id.in_(INDICATOR_SITE_IDS)),
+        delete(IngestionEtat).where(IngestionEtat.site_id.in_(INDICATOR_SITE_IDS)),
+        delete(Mesure).where(Mesure.site_id.in_(INDICATOR_SITE_IDS)),
+        delete(Site).where(Site.site_id.in_(INDICATOR_SITE_IDS)),
+    ):
+        await db_session.execute(statement)
+    await db_session.commit()

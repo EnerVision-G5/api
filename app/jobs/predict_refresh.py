@@ -28,7 +28,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.session import get_engine, get_session_factory
 from app.models.energy import Site
-from app.predict_client import ServingUnavailableError, request_prediction
+from app.predict_client import (
+    ServingNotReadyError,
+    ServingUnavailableError,
+    request_prediction,
+)
 from app.predictions_store import UnknownModelError, store_prediction
 
 logger = logging.getLogger("app.jobs.predict_refresh")
@@ -70,6 +74,12 @@ async def refresh_site(site_id: str, horizon_hours: int) -> SiteOutcome:
     """
     try:
         prediction = await request_prediction(site_id, horizon_hours)
+    except ServingNotReadyError as error:
+        # Registre vide : ce n'est pas un incident, c'est l'état du projet
+        # tant qu'aucun modèle n'est promu. Journalisé en avertissement pour
+        # que l'astreinte ne parte pas chercher une panne de service.
+        logger.warning("Rien à servir pour %s : %s", site_id, error)
+        return SiteOutcome(site_id, stored=0, error=str(error))
     except ServingUnavailableError as error:
         logger.error("Prédiction indisponible pour %s : %s", site_id, error)
         return SiteOutcome(site_id, stored=0, error=str(error))

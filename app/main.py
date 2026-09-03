@@ -17,14 +17,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
+<<<<<<< HEAD
 from app.core.config import check_cors_origins, get_cors_origins, get_jwt_secret
 from app.routers import alerts, auth, health, predictions, sites
+=======
+from app.core.config import get_jwt_secret
+from app.routers import alerts, auth, health, indicators, predictions, sites
+>>>>>>> 4ea81ac (feat(indicators): serve ingestion freshness, degraded ratio and forecast error)
 from app.schemas.auth import UserOut
 
 # Version du contrat gelé dans enervision/docs/contracts/openapi-api.json.
 # Incrémentée en semver : patch pour une description, minor pour un champ
 # optionnel ajouté, major pour un champ retiré ou renommé.
-CONTRACT_VERSION = "1.1.0"
+CONTRACT_VERSION = "1.2.0"
 
 API_PREFIX = "/api/v1"
 
@@ -99,6 +104,10 @@ app.include_router(auth.router, prefix=API_PREFIX)
 app.include_router(sites.router, prefix=API_PREFIX)
 app.include_router(predictions.router, prefix=API_PREFIX)
 app.include_router(alerts.router, prefix=API_PREFIX)
+# Après sites.py, et sans conséquence : la collection des indicateurs est à
+# /indicators, au premier niveau. Un chemin littéral sous /sites serait avalé
+# par /sites/{site_id}, déclaré plus haut — voir le module.
+app.include_router(indicators.router, prefix=API_PREFIX)
 
 
 def _normalize_error_responses(spec: dict[str, Any]) -> dict[str, Any]:
