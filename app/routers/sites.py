@@ -12,18 +12,20 @@ spécification, que le contrat gelé ne contient pas. Le job contract-drift
 """
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.lookups import ensure_site_exists
 from app.db.session import get_db
 from app.models.energy import Mesure, Site
 from app.schemas.common import ErrorResponse, PaginationMeta
 from app.schemas.energy import EnergyReadingOut, ReadingsPage, SiteOut
 from app.security import CurrentUser
+from app.timewindow import parse_window
 
 router = APIRouter(prefix="/sites", tags=["sites"])
 
@@ -59,29 +61,6 @@ READING_COLUMNS = (
     Mesure.consumption_kw_imputed,
     Mesure.imputation_method,
 )
-
-
-def _as_utc(moment: datetime) -> datetime:
-    """Ramène un horodatage de requête en UTC.
-
-    Le contrat annonce de l'ISO 8601 UTC, mais un client peut omettre le
-    décalage. La colonne ts étant TIMESTAMPTZ, comparer un datetime naïf
-    ferait échouer le driver : l'absence de décalage est donc interprétée
-    comme de l'UTC plutôt que remontée en 500.
-    """
-    if moment.tzinfo is None:
-        return moment.replace(tzinfo=UTC)
-    return moment.astimezone(UTC)
-
-
-async def _ensure_site_exists(session: AsyncSession, site_id: str) -> None:
-    """Lève 404 si le site est absent du référentiel."""
-    known = await session.scalar(select(Site.site_id).where(Site.site_id == site_id))
-    if known is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Site inconnu : {site_id}.",
-        )
 
 
 def _window_filters(
@@ -169,13 +148,8 @@ async def list_readings(
     #
     # meta.total compte les mesures de la fenêtre entière et non celles de la
     # page, pour que le client sache combien de pages il reste à parcourir.
-    start_utc, end_utc = _as_utc(start_time), _as_utc(end_time)
-    if start_utc > end_utc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="start_time doit être antérieur ou égal à end_time.",
-        )
-    await _ensure_site_exists(session, site_id)
+    start_utc, end_utc = parse_window(start_time, end_time)
+    await ensure_site_exists(session, site_id)
 
     filters = _window_filters(site_id, start_utc, end_utc)
     total = await session.scalar(
@@ -215,7 +189,7 @@ async def get_latest_reading(
     # documente que 401 et 404 sur cet endpoint et son modèle de réponse n'est
     # pas nullable, aucun autre code n'est disponible. Le message distingue les
     # deux causes.
-    await _ensure_site_exists(session, site_id)
+    await ensure_site_exists(session, site_id)
     row = (
         await session.execute(
             select(*READING_COLUMNS)

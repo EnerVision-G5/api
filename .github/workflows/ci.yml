@@ -1,10 +1,12 @@
 name: ci
 
+# Déclenchée uniquement par pull request : sur une branche de travail, chaque
+# push rejouait la CI sans que personne ne lise le résultat avant l'ouverture
+# de la PR. Conséquence assumée : un push direct sur une branche protégée
+# n'est plus testé, le passage par une PR devient la seule voie contrôlée.
+# workflow_call est conservé : cd.yml appelle cette CI juste avant le build de
+# l'image, donc rien n'est publié sans avoir été testé.
 on:
-  # Sur master, la CI est jouée par cd.yml (via workflow_call) juste avant le
-  # build de l'image : inutile de la lancer deux fois.
-  push:
-    branches-ignore: [master]
   pull_request:
   # Réutilisable : cd.yml appelle ce workflow pour garder une seule définition
   # des étapes lint / test / build / dérive du contrat.
@@ -110,8 +112,10 @@ jobs:
     name: Grype (CVE de l'image)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Scan informatif : une CVE dans l'image de base ne doit pas bloquer une PR
-    # de code. Le job reste visible en échec, mais ne fait pas échouer la CI.
+    # Scan informatif, sur décision d'équipe : une alerte est visible en échec
+    # mais ne bloque pas la CI. Les dérogations argumentées et datées restent
+    # dans SECURITY.md, qui documente notamment les CVE de starlette que la
+    # contrainte de version de FastAPI empêche de corriger.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -165,8 +169,10 @@ jobs:
     # Le scan actif interroge chaque opération du contrat : il dure quelques
     # minutes, et une borne évite qu'un blocage ne consomme l'heure complète.
     timeout-minutes: 30
-    # Scan informatif : une alerte ZAP ne doit pas bloquer une PR de code. Le
-    # job reste visible en échec, mais ne fait pas échouer la CI.
+    # Scan informatif, sur décision d'équipe : une alerte est visible en échec
+    # mais ne bloque pas la CI. Les dérogations argumentées et datées restent
+    # dans SECURITY.md, qui documente notamment les CVE de starlette que la
+    # contrainte de version de FastAPI empêche de corriger.
     continue-on-error: true
 
     # Base éphémère, comme pour pytest : sans schéma, chaque route de lecture
