@@ -1,10 +1,7 @@
 # Lock dev = runtime + outils de dev/test.
 -r requirements.txt
 
-certifi==2026.7.22
 coverage==7.16.0
-httpcore==1.0.9
-httpx==0.28.1
 iniconfig==2.3.0
 packaging==26.3
 pluggy==1.6.0

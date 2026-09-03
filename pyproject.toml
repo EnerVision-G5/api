@@ -24,13 +24,15 @@ dependencies = [
     # avec les versions récentes de bcrypt. Un seul mécanisme, dans
     # app/password.py.
     "argon2-cffi==25.1.0",
+    # Client du service d'inference : le proxy POST /api/v1/predict en a
+    # besoin a l'execution, ce n'est plus une dependance de test.
+    "httpx==0.28.1",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest==9.1.1",
     "pytest-cov==7.1.0",
-    "httpx==0.28.1",
     "ruff==0.16.5",
 ]
 

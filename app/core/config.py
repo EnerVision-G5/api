@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60
     jwt_algorithm: str = "HS256"
 
+    # Service d'inférence (Serving), joint sur ml_network. L'API fait proxy
+    # vers POST {predict_url}/api/v1/predict : le chemin vient du contrat de
+    # predict et n'est donc pas configurable, seule l'adresse du service l'est.
+    # Sans valeur, l'appel échoue en 503, comme si Serving était injoignable.
+    predict_url: str = ""
+
+    # Délai total de l'appel à Serving, court à dessein : le dashboard attend
+    # la réponse, mieux vaut un 503 franc qu'une requête suspendue.
+    predict_timeout_seconds: float = 3.0
+
 
 @lru_cache
 def get_settings() -> Settings:

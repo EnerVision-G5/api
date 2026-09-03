@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.lookups import ensure_site_exists
 from app.db.session import get_db
 from app.models.energy import Mesure, Site
 from app.schemas.common import ErrorResponse, PaginationMeta
@@ -72,16 +73,6 @@ def _as_utc(moment: datetime) -> datetime:
     if moment.tzinfo is None:
         return moment.replace(tzinfo=UTC)
     return moment.astimezone(UTC)
-
-
-async def _ensure_site_exists(session: AsyncSession, site_id: str) -> None:
-    """Lève 404 si le site est absent du référentiel."""
-    known = await session.scalar(select(Site.site_id).where(Site.site_id == site_id))
-    if known is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Site inconnu : {site_id}.",
-        )
 
 
 def _window_filters(
@@ -175,7 +166,7 @@ async def list_readings(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="start_time doit être antérieur ou égal à end_time.",
         )
-    await _ensure_site_exists(session, site_id)
+    await ensure_site_exists(session, site_id)
 
     filters = _window_filters(site_id, start_utc, end_utc)
     total = await session.scalar(
@@ -215,7 +206,7 @@ async def get_latest_reading(
     # documente que 401 et 404 sur cet endpoint et son modèle de réponse n'est
     # pas nullable, aucun autre code n'est disponible. Le message distingue les
     # deux causes.
-    await _ensure_site_exists(session, site_id)
+    await ensure_site_exists(session, site_id)
     row = (
         await session.execute(
             select(*READING_COLUMNS)
