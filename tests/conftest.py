@@ -401,20 +401,51 @@ async def obtain_token(http_client: AsyncClient, username: str) -> str:
     return response.json()["access_token"]
 
 
+@pytest.fixture(scope="session")
+def token_cache() -> dict[str, str]:
+    """Jetons des clients authentifiés, obtenus une fois par session.
+
+    Un jeton vit une heure et ne porte aucun état mutable : le réobtenir à
+    chaque test ne prouve rien de plus, et fait payer une vérification argon2
+    de 64 MiB à chaque fois. Sans ce cache, la suite met une quarantaine de
+    secondes au lieu de quelques-unes, et le prix grossit à chaque test ajouté.
+
+    Les tests qui éprouvent la délivrance elle-même appellent obtain_token
+    directement et passent donc toujours par le vrai endpoint.
+    """
+    return {}
+
+
+async def authenticated(
+    http_client: AsyncClient,
+    token_cache: dict[str, str],
+    username: str,
+) -> AsyncClient:
+    """Pose l'en-tête Authorization du compte demandé sur le client."""
+    token = token_cache.get(username)
+    if token is None:
+        token = await obtain_token(http_client, username)
+        token_cache[username] = token
+    http_client.headers["Authorization"] = f"Bearer {token}"
+    return http_client
+
+
 @pytest.fixture
-async def api_client(anonymous_client: AsyncClient) -> AsyncClient:
+async def api_client(
+    anonymous_client: AsyncClient,
+    token_cache: dict[str, str],
+) -> AsyncClient:
     """Client authentifié en reader : le cas courant depuis EV-12."""
-    token = await obtain_token(anonymous_client, READER_USERNAME)
-    anonymous_client.headers["Authorization"] = f"Bearer {token}"
-    return anonymous_client
+    return await authenticated(anonymous_client, token_cache, READER_USERNAME)
 
 
 @pytest.fixture
-async def writer_client(anonymous_client: AsyncClient) -> AsyncClient:
+async def writer_client(
+    anonymous_client: AsyncClient,
+    token_cache: dict[str, str],
+) -> AsyncClient:
     """Client authentifié en writer."""
-    token = await obtain_token(anonymous_client, WRITER_USERNAME)
-    anonymous_client.headers["Authorization"] = f"Bearer {token}"
-    return anonymous_client
+    return await authenticated(anonymous_client, token_cache, WRITER_USERNAME)
 
 
 @pytest.fixture
