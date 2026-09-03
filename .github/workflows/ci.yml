@@ -110,6 +110,9 @@ jobs:
     name: Grype (CVE de l'image)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Scan informatif : une CVE dans l'image de base ne doit pas bloquer une PR
+    # de code. Le job reste visible en échec, mais ne fait pas échouer la CI.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -162,6 +165,9 @@ jobs:
     # Le scan actif interroge chaque opération du contrat : il dure quelques
     # minutes, et une borne évite qu'un blocage ne consomme l'heure complète.
     timeout-minutes: 30
+    # Scan informatif : une alerte ZAP ne doit pas bloquer une PR de code. Le
+    # job reste visible en échec, mais ne fait pas échouer la CI.
+    continue-on-error: true
 
     # Base éphémère, comme pour pytest : sans schéma, chaque route de lecture
     # répondrait 500 et le scan ne mesurerait que la page d'erreur. Port 5434
