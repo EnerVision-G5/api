@@ -19,7 +19,11 @@ les alertes sous JWT.
   TimescaleDB en SQLAlchemy asynchrone (asyncpg) ;
 - l'**authentification JWT** (ticket EV-12) : `POST /auth/token` délivre un
   jeton, les lectures l'exigent, et `require_role` est prête pour les futures
-  écritures. `GET /alerts` reste en `501`.
+  écritures ;
+- les **prédictions** (ticket EV-38) : un job planifié interroge le service
+  d'inférence et archive le résultat, que
+  `GET /api/v1/sites/{site_id}/predictions` sert au dashboard.
+  `GET /alerts` reste en `501`.
 
 ## Démarrer
 
@@ -62,6 +66,11 @@ uvicorn app.main:app --reload --port 8080
 | `app/schemas/auth.py` | `TokenResponse`, `UserOut` |
 | `app/models/user.py` | Modèle ORM `AppUser` (comptes locaux, rôles) |
 | `app/password.py` | Hachage argon2id (seul module à le manipuler) |
+| `app/jobs/predict_refresh.py` | Job de rafraîchissement des prédictions |
+| `app/predict_client.py` | Client HTTP du service d'inférence |
+| `app/predictions_store.py` | Archivage des prédictions |
+| `app/timewindow.py` | Fenêtre de temps partagée par les routes paginées |
+| `app/db/lookups.py` | Consultations de référentiel partagées |
 | `app/security.py` | JWT, `get_current_user`, `require_role` |
 | `app/routers/` | Routes, une par domaine, sans logique métier |
 | `alembic/` | Migrations |
@@ -173,6 +182,90 @@ ajouter un ferait dériver la spécification. Elle refuse en `403`, et non en
 
 Hors périmètre à ce stade : pas de rate limiting sur `/auth/token`, pas de
 jeton de rafraîchissement, aucune gestion des utilisateurs par l'API.
+
+## Prédictions
+
+Le dashboard **ne déclenche jamais** une prédiction. Un job planifié interroge
+le service d'inférence, archive le résultat, et le dashboard le relit :
+
+```
+cron  ──►  app.jobs.predict_refresh  ──►  Serving (POST /api/v1/predict)
+                     │
+                     ▼
+                base ─────►  GET /api/v1/sites/{site_id}/predictions  ──►  dashboard
+```
+
+`POST /api/v1/predict` appartient à Serving seul : l'API en est cliente et ne
+le réexpose pas.
+
+### Le job
+
+```bash
+python -m app.jobs.predict_refresh
+```
+
+Destiné à un **conteneur cron dédié**, à la manière du Collector : aucun
+ordonnanceur n'est embarqué dans le processus de l'API, ce qui la laisse sans
+état et permet de rejouer le job à la main sans la redémarrer.
+
+| Variable | Rôle |
+|---|---|
+| `DATABASE_URL` | base à alimenter |
+| `PREDICT_URL` | adresse de Serving. Le chemin `/api/v1/predict` vient de son contrat et n'est pas configurable |
+| `PREDICT_HORIZON_HOURS` | profondeur demandée, 24 par défaut (bornes du contrat : 1 à 48) |
+| `PREDICT_TIMEOUT_SECONDS` | délai par site, 10 par défaut |
+
+Il lit les sites **actifs**, appelle Serving pour chacun, archive les points,
+et écrit un résumé d'une ligne par site :
+
+```
+SITE001 ok 24 points
+SITE002 echec ReadTimeout: delai depasse
+Bilan : 6/7 site(s) traité(s), 144 ligne(s) archivée(s).
+```
+
+**Un site en échec n'arrête pas la tournée.** Le code de sortie ne vaut `1`
+que si *aucun* site n'a abouti : une panne isolée ne doit pas réveiller
+l'astreinte, une panne générale doit le faire. Un référentiel sans site actif
+compte aussi pour un échec, une base vide n'étant pas un succès.
+
+**Idempotence** : la clé du schéma v1.0 est `(modele_id, site_id, ts_cible)`
+et le conflit met la ligne à jour. Rejouer le job ne duplique rien, et une
+nouvelle prévision du même instant par le même modèle **remplace** la
+précédente, la plus fraîche étant celle qui vaut. `generated_at` suit la mise à
+jour : c'est la date de production par Serving, distincte de `created_at` qui
+date l'insertion.
+
+**`model_version` n'est pas archivé**, et c'est voulu : la valeur est celle de
+`modele.version`, atteinte par la jointure sur `modele_id`. Le service
+d'inférence la lit dans le registre MLflow et l'entraînement l'y repose à
+chaque promotion — la dupliquer ouvrirait deux valeurs pour un même fait, sans
+arbitre. Le job traduit donc la version annoncée en clé du registre, et
+**échoue ce site** s'il ne la résout pas : `prediction.modele_id` est `NOT
+NULL`, il n'y a rien à quoi rattacher la ligne. Deux cas, distingués dans les
+logs — version absente du registre (le service sert un modèle chargé par
+chemin d'artefact plutôt que par alias), ou version portée par plusieurs
+modèles sans qu'un seul soit actif, la clé de `modele` étant `(nom, version)`
+que le contrat ne transporte pas.
+
+### La route de lecture
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN"      "http://localhost:8080/api/v1/sites/SITE001/predictions?start_time=2026-09-03T00:00:00Z&end_time=2026-09-04T00:00:00Z"
+```
+
+Symétrique de `/readings` : mêmes paramètres, `start_time` et `end_time`
+requis, `limit` de 1 à 1000 par défaut 100, `offset` par défaut 0, tri par
+horodatage croissant, `meta.total` exact sur la fenêtre. La fenêtre de temps et
+la vérification d'existence du site sont **partagées** entre les deux routes,
+pour qu'un site inconnu ou des bornes inversées répondent la même chose des
+deux côtés.
+
+La fenêtre porte sur l'horodatage **cible**, pas sur la date de génération : le
+client demande « que prévoit-on pour telle période ». Il y a une ligne par
+modèle et par instant cible, celle de la prévision la plus fraîche ; deux
+modèles distincts prédisant le même instant donnent deux lignes, que leur
+`model_version` distingue.
 
 ## Migrations
 
