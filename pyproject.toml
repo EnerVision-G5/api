@@ -60,7 +60,18 @@ testpaths = ["tests"]
 
 [tool.coverage.run]
 source = ["app"]
+# Le périmètre du seuil est le cœur applicatif. main.py en est exclu : il ne
+# contient que l'assemblage et le lifespan de démarrage, dont les chemins
+# d'échec (clé absente, origines invalides) sont éprouvés par tests/test_config.py
+# et tests/test_cors.py sans passer par une couverture de ligne.
+omit = ["app/main.py"]
 # SQLAlchemy asyncio fait la bascule sync/async par greenlet. Sans ce
 # reglage, coverage perd la trace a chaque await sur la base et declare
 # non couvertes des lignes que les tests executent bel et bien.
 concurrency = ["greenlet", "thread"]
+
+[tool.coverage.report]
+# La cible d'équipe est 70 % du cœur. Opposable : sous ce seuil, pytest
+# échoue et la CI avec lui. Mesurer sans imposer laissait la couverture
+# dériver sans que rien ne l'arrête.
+fail_under = 70

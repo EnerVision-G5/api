@@ -110,9 +110,12 @@ jobs:
     name: Grype (CVE de l'image)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Scan informatif : une CVE dans l'image de base ne doit pas bloquer une PR
-    # de code. Le job reste visible en échec, mais ne fait pas échouer la CI.
-    continue-on-error: true
+    # Bloquant. Une CVE de sévérité haute dans l'image livrée n'est pas une
+    # information, c'est un défaut de la livraison : la laisser passer revient
+    # à décider de l'ignorer sans que personne ne l'ait décidé. Les
+    # dérogations assumées sont écrites dans SECURITY.md, avec leur date
+    # d'expiration, et c'est ce document qui autorise à passer outre — pas un
+    # drapeau dans le workflow.
     steps:
       - uses: actions/checkout@v4
 
@@ -165,9 +168,9 @@ jobs:
     # Le scan actif interroge chaque opération du contrat : il dure quelques
     # minutes, et une borne évite qu'un blocage ne consomme l'heure complète.
     timeout-minutes: 30
-    # Scan informatif : une alerte ZAP ne doit pas bloquer une PR de code. Le
-    # job reste visible en échec, mais ne fait pas échouer la CI.
-    continue-on-error: true
+    # Bloquant, pour la même raison que Grype : une alerte du scan dynamique
+    # décrit un comportement de l'API livrée, pas un avis. Les dérogations
+    # passent par SECURITY.md.
 
     # Base éphémère, comme pour pytest : sans schéma, chaque route de lecture
     # répondrait 500 et le scan ne mesurerait que la page d'erreur. Port 5434
