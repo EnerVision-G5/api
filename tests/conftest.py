@@ -44,14 +44,19 @@ import pytest  # noqa: E402
 from argon2 import PasswordHasher  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
-from sqlalchemy import text  # noqa: E402
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy import delete, select, text  # noqa: E402
+from sqlalchemy.ext.asyncio import (  # noqa: E402
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.core.config import get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402
 from app.db.session import get_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.energy import Mesure, Site  # noqa: E402
+from app.models.prediction import Modele, Prediction  # noqa: E402
 from app.models.user import LOCAL_PROVIDER, AppUser  # noqa: E402
 from app.password import hash_password  # noqa: E402
 
@@ -98,6 +103,30 @@ weak_hasher = PasswordHasher(time_cost=1, memory_cost=8192, parallelism=1)
 UNKNOWN_USERNAME = "personne"
 
 TOKEN_URL = "/api/v1/auth/token"
+
+# Registre des modèles. Le contrat ne transporte que model_version, et la clé
+# de `modele` porte sur (nom, version) : une version ne désigne un modèle que
+# si elle est unique, ou si une seule des lignes qui la portent est active.
+KNOWN_MODEL_NAME = "enervision_xgboost"
+KNOWN_MODEL_VERSION = "7"
+
+# Deux modèles portent cette version et aucun n'est actif : la résolution est
+# alors ambiguë et l'archivage doit être abandonné plutôt que d'en choisir un.
+AMBIGUOUS_MODEL_VERSION = "9"
+
+# Deux la portent aussi, mais un seul est actif : c'est lui qui tranche.
+ARBITRATED_MODEL_VERSION = "11"
+ARBITRATED_MODEL_NAME = "enervision_lstm"
+
+# Version qu'aucune ligne ne porte. C'est la forme que prend model_version
+# quand le service sert un modèle chargé par chemin d'artefact plutôt que par
+# alias : il retombe alors sur son identifiant interne.
+UNKNOWN_MODEL_VERSION = "9f2c1ab4e7d0"
+
+# Sites ajoutés le temps d'un test par la fixture extra_active_sites, pour que
+# le job de prédiction rencontre les sept sites du projet. Hors du seed global,
+# qui doit rester celui sur lequel les tests d'EV-11 comptent.
+EXTRA_ACTIVE_SITE_IDS = ("SITE004", "SITE005", "SITE006", "SITE007")
 
 
 def _sites() -> list[Site]:
@@ -174,6 +203,26 @@ def _users() -> list[AppUser]:
             display_name="Hachage à remettre à niveau",
             role="reader",
             password_hash=weak_hasher.hash(TEST_PASSWORD),
+        ),
+    ]
+
+
+def _models() -> list[Modele]:
+    """Registre des modèles de test.
+
+    Alimenté par le service d'entraînement à chaque promotion en exploitation,
+    jamais par l'API. Ces lignes servent à éprouver les quatre cas de
+    résolution : unique, arbitré par `actif`, ambigu, absent.
+    """
+    return [
+        Modele(nom=KNOWN_MODEL_NAME, version=KNOWN_MODEL_VERSION, actif=True),
+        Modele(nom="baseline", version=AMBIGUOUS_MODEL_VERSION, actif=False),
+        Modele(nom="enervision_lstm", version=AMBIGUOUS_MODEL_VERSION, actif=False),
+        Modele(nom="baseline", version=ARBITRATED_MODEL_VERSION, actif=False),
+        Modele(
+            nom=ARBITRATED_MODEL_NAME,
+            version=ARBITRATED_MODEL_VERSION,
+            actif=True,
         ),
     ]
 
@@ -358,9 +407,53 @@ async def seeded_database(engine) -> None:
     async with factory() as session:
         session.add_all(_sites())
         session.add_all(_users())
+        session.add_all(_models())
         await session.flush()
         session.add_all(_readings())
         await session.commit()
+
+
+async def modele_id_of(session: AsyncSession, version: str, nom: str) -> int:
+    """Clé du registre pour un modèle du seed."""
+    return await session.scalar(
+        select(Modele.modele_id).where(Modele.nom == nom, Modele.version == version),
+    )
+
+
+@pytest.fixture
+async def known_model_id(db_session: AsyncSession) -> int:
+    """Clé du modèle actif du seed, à rattacher aux prédictions archivées."""
+    return await modele_id_of(db_session, KNOWN_MODEL_VERSION, KNOWN_MODEL_NAME)
+
+
+@pytest.fixture
+async def extra_active_sites(db_session: AsyncSession):
+    """Complète le référentiel à sept sites actifs, puis le remet en état.
+
+    Le seed global en compte trois, dont un inactif, et les tests d'EV-11
+    vérifient cette liste au site près. Les ajouts sont donc locaux et défaits
+    à la sortie, prédictions rattachées comprises.
+    """
+    db_session.add_all(
+        [
+            Site(
+                site_id=site_id,
+                site_type="unknown",
+                site_name=f"Site de test {site_id}",
+                location="À synchroniser",
+                capacity_kw=Decimal("500.00"),
+                status="active",
+            )
+            for site_id in EXTRA_ACTIVE_SITE_IDS
+        ],
+    )
+    await db_session.commit()
+    yield EXTRA_ACTIVE_SITE_IDS
+    await db_session.execute(
+        delete(Prediction).where(Prediction.site_id.in_(EXTRA_ACTIVE_SITE_IDS)),
+    )
+    await db_session.execute(delete(Site).where(Site.site_id.in_(EXTRA_ACTIVE_SITE_IDS)))
+    await db_session.commit()
 
 
 @pytest.fixture
