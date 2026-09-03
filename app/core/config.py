@@ -44,6 +44,21 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60
     jwt_algorithm: str = "HS256"
 
+    # Service d'inférence (Serving). Le job de prédiction appelle
+    # POST {predict_url}/api/v1/predict : le chemin vient du contrat de
+    # predict et n'est donc pas configurable, seule l'adresse du service
+    # l'est. Sans valeur, le job échoue sur chaque site en le disant.
+    predict_url: str = ""
+
+    # Profondeur demandée à chaque exécution, dans les bornes du contrat de
+    # predict (1 à 48).
+    predict_horizon_hours: int = 24
+
+    # Délai total par site. Plus généreux que pour une requête interactive :
+    # le job n'a personne qui l'attend, et une inférence est plus lente qu'une
+    # lecture en base.
+    predict_timeout_seconds: float = 10.0
+
 
 @lru_cache
 def get_settings() -> Settings:
