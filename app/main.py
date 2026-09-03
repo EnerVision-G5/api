@@ -7,6 +7,8 @@ Source de vérité du contrat. Toute modification exige une PR sur
 enervision/docs/contracts et la relecture des trois consommateurs.
 """
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request, status
@@ -14,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
+from app.core.config import get_jwt_secret
 from app.routers import alerts, auth, health, sites
 from app.schemas.auth import UserOut
 
@@ -24,9 +27,24 @@ CONTRACT_VERSION = "1.0.0"
 
 API_PREFIX = "/api/v1"
 
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Valide la configuration de signature avant d'accepter le trafic.
+
+    Démarrer avec une clé absente ou trop courte donnerait une API qui
+    répond, délivre des jetons et les accepte, tout en étant forgeable : il
+    vaut mieux ne pas démarrer du tout et le dire. La vérification est ici,
+    et non à l'import, pour que l'export du contrat OpenAPI et les tests qui
+    ne touchent pas à l'authentification n'exigent aucun secret.
+    """
+    get_jwt_secret()
+    yield
+
+
 app = FastAPI(
     title="EnerVision API métier",
     version=CONTRACT_VERSION,
+    lifespan=lifespan,
     description=(
         "Contrat de l'API métier on-premise : sites, mesures énergétiques et"
         " alertes, servis sous JWT. Les endpoints non triviaux renvoient 501"

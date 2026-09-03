@@ -13,8 +13,8 @@ from tests.conftest import (
     SITE_WITH_READINGS,
     SITE_WITHOUT_READINGS,
     T0,
+    assert_error_response,
 )
-from tests.test_sites import assert_error_response
 
 pytestmark = pytest.mark.anyio
 
@@ -114,6 +114,27 @@ async def test_readings_accepts_a_window_in_another_timezone(
     body = response.json()
     assert body["meta"]["total"] == READINGS_COUNT
     assert parse_timestamp(body["items"][0]) == T0
+
+
+async def test_readings_accepts_a_window_without_offset(
+    api_client: AsyncClient,
+) -> None:
+    """Une fenêtre sans décentrage horaire est lue comme de l'UTC.
+
+    Le contrat annonce de l'UTC : un client qui omet le décalage doit obtenir
+    la fenêtre attendue, et non un 500 du driver sur la comparaison d'un
+    horodatage naïf avec une colonne TIMESTAMPTZ.
+    """
+    response = await api_client.get(
+        READINGS_URL,
+        params={
+            "start_time": T0.replace(tzinfo=None).isoformat(),
+            "end_time": (T0 + 4 * MINUTE).replace(tzinfo=None).isoformat(),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["meta"]["total"] == READINGS_COUNT
 
 
 async def test_readings_pagination_is_consistent(api_client: AsyncClient) -> None:

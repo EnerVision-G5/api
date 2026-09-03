@@ -16,8 +16,10 @@ les alertes sous JWT.
 - les **endpoints de lecture des mesures** (ticket EV-11) : `GET /sites`,
   `GET /sites/{site_id}`, `GET /sites/{site_id}/readings` et
   `GET /sites/{site_id}/readings/latest`, branchés sur PostgreSQL /
-  TimescaleDB en SQLAlchemy asynchrone (asyncpg). `POST /auth/token` (EV-12)
-  et `GET /alerts` restent en `501`.
+  TimescaleDB en SQLAlchemy asynchrone (asyncpg) ;
+- l'**authentification JWT** (ticket EV-12) : `POST /auth/token` délivre un
+  jeton, les lectures l'exigent, et `require_role` est prête pour les futures
+  écritures. `GET /alerts` reste en `501`.
 
 ## Démarrer
 
@@ -25,6 +27,8 @@ les alertes sous JWT.
 
 ```bash
 cp .env.example .env          # ou : make env
+# Puis renseigner JWT_SECRET dans .env, sinon l'API refuse de demarrer :
+python -c "import secrets; print(secrets.token_urlsafe(48))"
 docker compose -f compose.dev.yml up --build
 ```
 
@@ -41,6 +45,7 @@ python -m venv .venv
 source .venv/bin/activate      # Windows : .venv\Scripts\activate
 pip install -r requirements-dev.txt
 cp .env.example .env
+# JWT_SECRET est vide dans .env.example : en generer un avant de demarrer.
 uvicorn app.main:app --reload --port 8080
 ```
 
@@ -55,7 +60,9 @@ uvicorn app.main:app --reload --port 8080
 | `app/schemas/common.py` | `ErrorResponse`, `PaginationMeta`, `DataQuality` |
 | `app/schemas/energy.py` | `SiteOut`, `EnergyReadingOut`, `ReadingsPage`, `AlertOut` |
 | `app/schemas/auth.py` | `TokenResponse`, `UserOut` |
-| `app/security.py` | Schéma OAuth2 exposé dans la spécification |
+| `app/models/user.py` | Modèle ORM `AppUser` (comptes locaux, rôles) |
+| `app/password.py` | Hachage argon2id (seul module à le manipuler) |
+| `app/security.py` | JWT, `get_current_user`, `require_role` |
 | `app/routers/` | Routes, une par domaine, sans logique métier |
 | `alembic/` | Migrations |
 | `scripts/export_openapi.py` | Export de la spécification OpenAPI |
@@ -92,20 +99,80 @@ La source de vérité du schéma reste `enervision-db/initdb/` dans le repo
 d'imputation) : une divergence entre les deux est un bug des modèles, à
 corriger ici.
 
-## Authentification (frontière EV-11 / EV-12)
+## Authentification
 
-`AUTH_ENABLED` pilote la dépendance `get_current_user` d'`app/security.py` :
+Flux OAuth2 mot de passe et jetons JWT signés en HS256, conformément à
+ADR-009 : aucun état côté serveur, le jeton voyage dans l'en-tête
+`Authorization`.
 
-| Valeur | Comportement |
+```bash
+# 1. Obtenir un jeton
+curl -s -X POST http://localhost:8080/api/v1/auth/token      -d 'username=dev.reader&password=changeme-dev' | jq -r .access_token
+
+# 2. L'utiliser
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/sites
+```
+
+Les comptes de développement `dev.reader` et `dev.writer` viennent du seed
+`enervision-db/dev-seed/dev_users.py` du repo **infra**, à appliquer
+explicitement : il est hors d'`initdb/` pour ne jamais atterrir en production.
+
+### Configuration
+
+| Variable | Rôle |
 |---|---|
-| `false` (défaut) | les lectures passent en anonyme, aucun jeton n'est exigé |
-| `true` | elles répondent `501`, faute de vérification de jeton implémentée |
+| `JWT_SECRET` | clé de signature, **32 caractères minimum**. L'API refuse de démarrer si elle est absente ou trop courte. Jamais versionnée |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | durée de vie, 60 par défaut |
+| `AUTH_ENABLED` | `true` par défaut. `false` repasse les endpoints en anonyme |
 
-Un `200` sous un drapeau nommé « auth activée » laisserait croire à une
-protection inexistante, et un `401` laisserait croire que le jeton fourni est
-en cause : d'où le `501`. Le décodage du JWT, `POST /auth/token` et les rôles
-sont le périmètre d'**EV-12**. Laisser `AUTH_ENABLED=false` tant qu'il n'est
-pas livré, sans quoi la suite de tests échoue.
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+`AUTH_ENABLED=false` reste offert pour appeler l'API sans se connecter en
+développement local. **À ne jamais déployer** : dans ce mode
+`get_current_user` rend `None` sans rien vérifier, et `require_role` laisse
+passer, faute d'utilisateur identifiable.
+
+### Hachage des mots de passe
+
+**argon2id**, via `argon2-cffi`, dans le seul module `app/password.py` :
+recommandation OWASP de premier choix, résistance au matériel dédié par le
+coût mémoire là où bcrypt ne coûte que du temps, et écosystème maintenu — à la
+différence de `passlib`, retiré du projet, qui n'est plus maintenu et se
+brouille avec les versions récentes de `bcrypt`.
+
+Les paramètres sont ceux d'`argon2-cffi` par défaut (`t=3`, `m=64 MiB`, `p=4`),
+au-dessus des minimums OWASP. Une connexion réussie dont le hachage a été
+produit avec des paramètres dépassés le remplace au passage : c'est le seul
+instant où l'API détient le mot de passe en clair.
+
+Aucun autre module ne manipule un hachage, et il n'existe qu'un seul
+mécanisme : pas de cohabitation bcrypt / argon2.
+
+### Ce que fait la vérification
+
+`get_current_user` contrôle la signature et l'expiration, lit `sub`, recharge
+l'utilisateur en base et refuse en `401` avec `WWW-Authenticate: Bearer` dans
+tous les autres cas. Le **rôle exposé est celui de la base**, pas celui du
+claim : un privilège retiré prend effet sans attendre l'expiration du jeton.
+Le claim `role` reste présent pour que le dashboard connaisse le sien sans
+appel supplémentaire, le contrat ne publiant aucun endpoint de profil.
+
+Un compte inconnu et un mot de passe faux renvoient le même message, et le
+hachage est vérifié dans les deux cas pour que le temps de réponse ne révèle
+pas quels comptes existent.
+
+### Rôles
+
+`reader` et `writer`, les valeurs de `UserOut.role` au contrat.
+`require_role("writer")` est livrée prête pour les futurs endpoints
+d'écriture ; **aucun endpoint du contrat gelé ne l'utilise à ce jour**, en
+ajouter un ferait dériver la spécification. Elle refuse en `403`, et non en
+`401` : l'appelant est authentifié, simplement pas autorisé.
+
+Hors périmètre à ce stade : pas de rate limiting sur `/auth/token`, pas de
+jeton de rafraîchissement, aucune gestion des utilisateurs par l'API.
 
 ## Migrations
 
@@ -136,4 +203,12 @@ pas les bumper sans PR de contrat.
 
 ## Secrets
 
-`.env` est ignoré par Git, seul `.env.example` est versionné.
+Les mots de passe sont hachés en argon2id, jamais stockés en clair, y compris
+dans les jeux de test et le seed de développement.
+
+`.env` est ignoré par Git, seul `.env.example` est versionné, et `JWT_SECRET`
+y est **volontairement vide** : aucune clé de signature ne doit exister dans
+le dépôt. En production elle vient de Key Vault (ADR-013).
+
+L'API valide la clé au démarrage plutôt qu'à la première requête : mieux vaut
+ne pas démarrer du tout que servir des jetons forgeables.

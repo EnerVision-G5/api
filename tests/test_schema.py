@@ -27,6 +27,20 @@ SITE_COLUMNS = {
     "status",
 }
 
+APP_USER_COLUMNS = {
+    "user_id",
+    "oauth_provider",
+    "oauth_subject",
+    "email",
+    "display_name",
+    "role",
+    # Ajoutée par 04_app_user_auth.sql (EV-12) : sans elle, aucun compte local
+    # ne peut s'authentifier.
+    "password_hash",
+    "created_at",
+    "last_login_at",
+}
+
 MESURE_COLUMNS = {
     "ts",
     "site_id",
@@ -60,6 +74,26 @@ async def columns_of(engine: AsyncEngine, table: str) -> set[str]:
 async def test_schema_conformite(engine: AsyncEngine, seeded_database: None) -> None:
     assert await columns_of(engine, "site") == SITE_COLUMNS
     assert await columns_of(engine, "mesure") == MESURE_COLUMNS
+    assert await columns_of(engine, "app_user") == APP_USER_COLUMNS
+
+
+async def test_role_est_contraint(engine: AsyncEngine, seeded_database: None) -> None:
+    """app_user.role n'accepte que les valeurs de UserOut.role du contrat.
+
+    Les anciennes valeurs du schéma v1.0 sont refusées : c'est ce que la
+    migration 04_app_user_auth.sql a converti.
+    """
+    async with engine.connect() as conn:
+        transaction = await conn.begin()
+        with pytest.raises(IntegrityError):
+            await conn.execute(
+                text(
+                    "INSERT INTO app_user"
+                    " (oauth_provider, oauth_subject, email, role)"
+                    " VALUES ('local', 'refuse', 'refuse@x.io', 'viewer')"
+                )
+            )
+        await transaction.rollback()
 
 
 async def test_imputation_method_est_contrainte(
