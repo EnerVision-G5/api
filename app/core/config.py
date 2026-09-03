@@ -12,6 +12,10 @@ class JwtSecretError(RuntimeError):
     """Clé de signature absente ou trop courte : l'API ne peut pas démarrer."""
 
 
+class CorsConfigurationError(RuntimeError):
+    """Origines CORS inexploitables : l'API ne peut pas démarrer."""
+
+
 class Settings(BaseSettings):
     """Configuration de l'application, chargée depuis l'environnement / .env."""
 
@@ -44,6 +48,15 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60
     jwt_algorithm: str = "HS256"
 
+    # Origines autorisées à appeler l'API depuis un navigateur, séparées par
+    # des virgules. Le dashboard est servi depuis une autre origine que l'API :
+    # sans cette liste, le navigateur bloque toutes ses requêtes.
+    #
+    # Vide par défaut, et jamais de joker : une valeur permissive livrée par
+    # inadvertance rendrait l'API lisible par n'importe quel site, et le défaut
+    # est justement ce qui se déploie quand personne n'a configuré.
+    cors_allowed_origins: str = ""
+
     # Service d'inférence (Serving). Le job de prédiction appelle
     # POST {predict_url}/api/v1/predict : le chemin vient du contrat de
     # predict et n'est donc pas configurable, seule l'adresse du service
@@ -63,6 +76,33 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def get_cors_origins() -> list[str]:
+    """Découpe CORS_ALLOWED_ORIGINS en liste d'origines.
+
+    Rend une liste vide quand rien n'est configuré : aucune origine n'est
+    alors autorisée, ce qui est le comportement sûr. Un joker est refusé au
+    démarrage plutôt que silencieusement accepté, voir check_cors_origins.
+    """
+    raw = get_settings().cors_allowed_origins
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def check_cors_origins() -> list[str]:
+    """Valide la liste des origines et la retourne.
+
+    Refuse un joker. `allow_origins=["*"]` conjugué à `allow_credentials`
+    est d'ailleurs rejeté par les navigateurs, mais l'erreur apparaîtrait
+    côté client sans que l'API ne signale rien : autant échouer ici.
+    """
+    origins = get_cors_origins()
+    if any("*" in origin for origin in origins):
+        raise CorsConfigurationError(
+            "CORS_ALLOWED_ORIGINS ne doit pas contenir de joker : lister les"
+            " origines une à une.",
+        )
+    return origins
 
 
 def get_jwt_secret() -> str:

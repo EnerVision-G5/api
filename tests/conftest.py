@@ -40,6 +40,12 @@ if not os.environ.get("JWT_SECRET"):
 # mode anonyme passent par la fixture auth_disabled.
 os.environ["AUTH_ENABLED"] = "true"
 
+# Les origines CORS sont lues au montage du middleware, donc à l'import de
+# l'application : les poser plus tard n'aurait aucun effet.
+ALLOWED_ORIGIN = "https://dashboard.enervision.test"
+REFUSED_ORIGIN = "https://ailleurs.example"
+os.environ["CORS_ALLOWED_ORIGINS"] = ALLOWED_ORIGIN
+
 import pytest  # noqa: E402
 from argon2 import PasswordHasher  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

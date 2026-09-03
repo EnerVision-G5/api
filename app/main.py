@@ -13,10 +13,11 @@ from typing import Any
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
-from app.core.config import get_jwt_secret
+from app.core.config import check_cors_origins, get_cors_origins, get_jwt_secret
 from app.routers import alerts, auth, health, predictions, sites
 from app.schemas.auth import UserOut
 
@@ -38,6 +39,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     ne touchent pas à l'authentification n'exigent aucun secret.
     """
     get_jwt_secret()
+    check_cors_origins()
     yield
 
 
@@ -50,6 +52,24 @@ app = FastAPI(
         " alertes, servis sous JWT. Les endpoints non triviaux renvoient 501"
         " tant que leur ticket d'implémentation n'est pas livré."
     ),
+)
+
+
+# Le dashboard est servi depuis une autre origine que l'API : sans ces
+# en-têtes, le navigateur refuse ses requêtes avant même qu'elles partent.
+#
+# La liste est lue au montage, une fois : changer les origines demande un
+# redémarrage, ce qui est le cas de toute la configuration. Aucun joker n'est
+# accepté, et allow_credentials va de pair avec des origines nommées — le
+# jeton voyage dans l'en-tête Authorization, pas dans un cookie, mais laisser
+# la porte ouverte à un site tiers reviendrait à lui offrir les réponses de
+# l'API pour tout utilisateur déjà connecté.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_cors_origins(),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
