@@ -1,0 +1,64 @@
+[project]
+name = "enervision-api"
+version = "0.1.0"
+description = "EnerVision — API FastAPI"
+requires-python = ">=3.12"
+
+# Dépendances runtime — versions épinglées.
+# Le lock complet (transitif) est dans requirements.txt / requirements-dev.txt.
+# fastapi / pydantic / uvicorn : voir l'avertissement en tête de requirements.txt
+# (contrat OpenAPI gelé — ne pas bumper sans PR de contrat).
+dependencies = [
+    "fastapi==0.121.2",
+    "pydantic==2.12.4",
+    "uvicorn[standard]==0.38.0",
+    "python-multipart==0.0.20",
+    "pydantic-settings==2.15.0",
+    "sqlalchemy==2.0.52",
+    "psycopg[binary]==3.3.5",
+    "asyncpg==0.30.0",
+    "alembic==1.19.1",
+    "python-jose[cryptography]==3.5.0",
+    # Hachage des mots de passe : argon2id, recommandation OWASP. passlib et
+    # bcrypt ont été retirés, passlib n'étant plus maintenu et se brouillant
+    # avec les versions récentes de bcrypt. Un seul mécanisme, dans
+    # app/password.py.
+    "argon2-cffi==25.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "httpx==0.28.1",
+    "ruff==0.16.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.pytest.ini_options]
+addopts = "-q --cov=app --cov-report=term-missing"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["app"]
+# SQLAlchemy asyncio fait la bascule sync/async par greenlet. Sans ce
+# reglage, coverage perd la trace a chaque await sur la base et declare
+# non couvertes des lignes que les tests executent bel et bien.
+concurrency = ["greenlet", "thread"]

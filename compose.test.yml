@@ -1,0 +1,29 @@
+# Base dediee aux tests d'integration (pytest).
+# Usage : docker compose -f compose.test.yml up -d  puis  pytest
+#
+# Meme image que la vraie base, pour que les tests rencontrent le meme moteur
+# et la meme version de TimescaleDB qu'en production.
+#
+# Port 5433 : la base de developpement occupe deja 5432, lancer les tests ne
+# doit pas obliger a l'arreter ni risquer d'ecrire dedans.
+#
+# tmpfs : les donnees vivent en memoire et disparaissent avec le conteneur.
+# Le schema est reconstruit par les fixtures a chaque session de tests, il n'y
+# a donc rien a persister, et rien a nettoyer entre deux executions.
+services:
+  test-db:
+    image: timescale/timescaledb:2.17.2-pg16
+    environment:
+      POSTGRES_DB: enervision_test
+      POSTGRES_USER: enervision
+      POSTGRES_PASSWORD: enervision
+      TIMESCALEDB_TELEMETRY: "off"
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U enervision -d enervision_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
