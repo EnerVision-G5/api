@@ -210,42 +210,11 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # Le schéma est construit depuis les modèles ORM, comme le fait
-      # tests/conftest.py : alembic/versions est vide, `upgrade head` ne
-      # créerait aucune table.
+      # Le schéma vient des migrations, pas d'un create_all : le scan
+      # rencontre ainsi la base que produit un vrai déploiement, index et
+      # hypertable compris.
       - name: Construire le schéma de la base éphémère
-        run: |
-          python - <<'PY'
-          import asyncio
-          import os
-
-          from sqlalchemy import text
-          from sqlalchemy.ext.asyncio import create_async_engine
-
-          import app.models  # noqa: F401  (enregistre les tables sur Base)
-          from app.db.base import Base
-
-          HYPERTABLE = (
-              "SELECT create_hypertable('mesure', 'ts',"
-              " chunk_time_interval => INTERVAL '7 days')"
-          )
-
-
-          async def main() -> None:
-              engine = create_async_engine(os.environ["DATABASE_URL"])
-              try:
-                  async with engine.begin() as conn:
-                      await conn.execute(
-                          text("CREATE EXTENSION IF NOT EXISTS timescaledb")
-                      )
-                      await conn.run_sync(Base.metadata.create_all)
-                      await conn.execute(text(HYPERTABLE))
-              finally:
-                  await engine.dispose()
-
-
-          asyncio.run(main())
-          PY
+        run: alembic upgrade head
 
       - name: Démarrer l'API à scanner
         env:

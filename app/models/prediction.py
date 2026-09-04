@@ -1,9 +1,9 @@
 """Modèles ORM des tables de prédiction : modele et prediction.
 
-Reflet du schéma figé du repo infra : 01_schema.sql pour le socle,
-05_prediction_contrat.sql pour les trois colonnes que le contrat réclamait.
-Ce module ne fait pas évoluer le schéma, toute divergence avec ces fichiers
-est un bug à corriger ici.
+Reflet du schéma porté par `alembic/versions/` : socle v1.0 et les trois
+colonnes que le contrat réclamait (bornes de l'intervalle, generated_at). Ce
+module ne fait pas évoluer le schéma, toute divergence avec les révisions est
+un bug à corriger ici.
 
 Deux points du schéma commandent le comportement du job et de la lecture :
 
@@ -26,6 +26,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Identity,
+    Index,
     Numeric,
     String,
     UniqueConstraint,
@@ -85,6 +86,10 @@ class Prediction(Base):
             "ts_cible",
             name="prediction_modele_id_site_id_ts_cible_key",
         ),
+        # La clé unique commence par modele_id : elle ne sert pas la lecture
+        # courante, qui interroge un site sur une fenêtre de temps sans
+        # connaître le modèle.
+        Index("idx_prediction_site_ts", "site_id", text("ts_cible DESC")),
     )
 
     prediction_id: Mapped[int] = mapped_column(

@@ -1,12 +1,13 @@
-"""Modèles ORM des tables lues par l'API métier : site et mesure.
+"""Modèles ORM des tables du socle énergie : site, mesure, mesure_exclu.
 
-Ces classes sont le REFLET en lecture du schéma figé, dont la source de vérité
-est le repo infra (enervision-db/initdb/01_schema.sql pour le socle,
-03_mesure_imputation.sql pour les colonnes d'imputation ajoutées par EV-08,
-06_ingestion_etat.sql et 07_mesure_quality_source.sql pour les indicateurs de
-confiance d'EV-18). Elles ne créent ni ne font évoluer le schéma : toute
-divergence constatée avec ces fichiers est un bug de ce module, jamais une
-évolution à appliquer en base.
+Ces classes sont le REFLET en lecture du schéma, dont la source de vérité est
+`alembic/versions/` de ce dépôt. Elles ne créent ni ne font évoluer le schéma :
+une divergence entre ce module et les révisions est un bug de ce module, et
+une évolution voulue passe par une nouvelle révision.
+
+Le schéma vient des scripts `enervision-db/initdb/*.sql` du dépôt infra, repris
+à l'identique par 0001_schema_v1 : socle v1.0, colonnes d'imputation d'EV-08,
+`ingestion_etat` et `quality_source` d'EV-18.
 
 Les contraintes CHECK sont reprises telles quelles pour que le schéma construit
 dans les tests d'intégration se comporte comme la vraie base.
@@ -16,13 +17,18 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
+    Identity,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -84,6 +90,22 @@ class Mesure(Base):
             "quality_source IN ('source', 'etl')",
             name="mesure_quality_source_check",
         ),
+        # Index partiels du schéma figé. La PK (site_id, ts) couvre déjà les
+        # lectures par site : ces deux-là ne servent que l'audit, et restent
+        # petits parce que la très grande majorité des mesures est saine et
+        # non imputée.
+        Index(
+            "idx_mesure_quality",
+            "data_quality",
+            text("ts DESC"),
+            postgresql_where=text("data_quality <> 'good'"),
+        ),
+        Index(
+            "idx_mesure_imputation",
+            "site_id",
+            text("ts DESC"),
+            postgresql_where=text("imputation_method <> 'none'"),
+        ),
     )
 
     # PK composite (site_id, ts) : contrainte TimescaleDB, toute clé doit
@@ -140,6 +162,58 @@ class Mesure(Base):
     )
 
     inserted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class MesureExclu(Base):
+    """Mesure écartée des calculs agrégés (périmètre gelé v1.0).
+
+    L'API ne l'ecrit pas : l'exclusion est posée par un analyste ou par
+    l'ETL. Elle est déclarée ici parce qu'elle appartient au schéma, que sa
+    clé étrangère composite vers l'hypertable en dépend, et que le schéma
+    des tests doit être complet.
+
+    La référence se fait par la clé naturelle (site_id, ts) : `mesure` n'a
+    pas d'identifiant de substitution, la contrainte TimescaleDB imposant
+    d'inclure la colonne de partitionnement dans toute clé.
+    """
+
+    __tablename__ = "mesure_exclu"
+    __table_args__ = (
+        # Une mesure n'est exclue qu'une fois : c'est ce qui rend l'écriture
+        # de l'ETL rejouable sans produire de doublon.
+        UniqueConstraint("site_id", "ts", name="mesure_exclu_site_id_ts_key"),
+        # FK composite vers l'hypertable, supportée depuis TimescaleDB 2.16
+        # (image épinglée : 2.17.2).
+        ForeignKeyConstraint(
+            ["site_id", "ts"],
+            ["mesure.site_id", "mesure.ts"],
+            name="mesure_exclu_site_id_ts_fkey",
+        ),
+    )
+
+    exclusion_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(always=True),
+        primary_key=True,
+    )
+    site_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Même renommage que sur Mesure : colonne `ts`, attribut `timestamp`.
+    timestamp: Mapped[datetime] = mapped_column(
+        "ts",
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    raison: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL = exclusion automatique, sans analyste derrière.
+    exclu_par: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("app_user.user_id"),
+    )
+    exclu_le: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),

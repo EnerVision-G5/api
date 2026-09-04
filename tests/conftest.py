@@ -12,11 +12,11 @@ compose.test.yml en local, dans les deux cas avec l'image
 timescale/timescaledb:2.17.2-pg16, celle de la vraie base.
 
 Limite assumée : le schéma de test est construit depuis les modèles ORM
-(app.models), pas depuis les scripts d'initdb, qui vivent dans le repo infra
-et ne sont pas accessibles à la CI de ce repo sans clé de déploiement
-supplémentaire. Les modèles portent les mêmes colonnes et les mêmes CHECK, et
-test_schema_conformite verrouille les colonnes ; une divergence constatée avec
-infra/enervision-db/initdb/ est un bug des modèles.
+(app.models), pas par `alembic upgrade head`. Reconstruire par migration à
+chaque session coûterait plus cher sans rien prouver de plus sur les
+comportements testés ici. Les deux doivent rester d'accord :
+test_schema_conformite verrouille les colonnes et les index, et une divergence
+avec alembic/versions/ est un bug des modèles.
 """
 
 import os
@@ -61,7 +61,8 @@ from app.core.config import get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402
 from app.db.session import get_db  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models.energy import IngestionEtat, Mesure, Site  # noqa: E402
+from app.models.energy import IngestionEtat, Mesure, MesureExclu, Site  # noqa: E402
+from app.models.observation import Alerte, CapteurEtat, CapteurPanne  # noqa: E402
 from app.models.prediction import Modele, Prediction  # noqa: E402
 from app.models.user import LOCAL_PROVIDER, AppUser  # noqa: E402
 from app.password import hash_password  # noqa: E402
@@ -428,7 +429,104 @@ async def seeded_database(engine) -> None:
         session.add_all(_models())
         await session.flush()
         session.add_all(_readings())
+        await session.flush()
+        # Après les mesures, jamais avant : `mesure_exclu` porte une clé
+        # étrangère vers `mesure`, et une exclusion posée sur une mesure absente
+        # serait rejetée par la base.
+        session.add_all(_exclusions())
+        session.add_all(_alertes())
+        session.add_all(_capteurs())
+        session.add_all(_pannes())
         await session.commit()
+
+
+# Identifiants d'alertes du jeu de données. La source les construit stables,
+# de la forme ALR-<site>-<epoch> : c'est ce qui rend la collecte rejouable.
+ALERT_CRITICAL = "ALR-SITE001-1000000000"
+ALERT_LOW = "ALR-SITE001-1000000060"
+ALERT_OTHER_SITE = "ALR-SITE002-1000000120"
+
+# Mesure du jeu de données écartée des agrégats, et son motif. Elle reste
+# servie par les routes de lecture : c'est le consommateur qui la retire de
+# ses moyennes, pas l'API qui la cache.
+EXCLUDED_READING_INDEX = 2
+EXCLUSION_REASON = "network_loss"
+
+
+def _exclusions() -> list[MesureExclu]:
+    """Une mesure écartée, pour que `excluded` ait deux valeurs à prendre.
+
+    Une seule suffit : ce qui est éprouvé est la jointure externe, et un jeu
+    où toutes les mesures seraient écartées ne distinguerait pas une jointure
+    externe d'une jointure interne.
+    """
+    return [
+        MesureExclu(
+            site_id=SITE_WITH_READINGS,
+            timestamp=T0 + EXCLUDED_READING_INDEX * MINUTE,
+            raison=EXCLUSION_REASON,
+        )
+    ]
+
+
+def _alertes() -> list[Alerte]:
+    """Trois alertes : deux gravités sur un site, une sur un autre.
+
+    De quoi éprouver les trois filtres du contrat sans que le jeu ne devienne
+    illisible : le site, la gravité, et la nature.
+    """
+    return [
+        Alerte(
+            alert_id=ALERT_CRITICAL,
+            site_id=SITE_WITH_READINGS,
+            ts=T0 + MINUTE,
+            severity="critical",
+            type_alerte="outage",
+            message="Risque de surcharge",
+            valeur=Decimal("812.50"),
+            seuil=Decimal("720.00"),
+        ),
+        Alerte(
+            alert_id=ALERT_LOW,
+            site_id=SITE_WITH_READINGS,
+            ts=T0,
+            severity="low",
+            type_alerte="sensor",
+            message="Capteur de température muet",
+            # Une alerte de capteur n'a ni valeur ni seuil : c'est le cas qui
+            # justifie que les deux colonnes soient nullables.
+            valeur=None,
+            seuil=None,
+        ),
+        Alerte(
+            alert_id=ALERT_OTHER_SITE,
+            site_id="SITE002",
+            ts=T0 + 2 * MINUTE,
+            severity="high",
+            type_alerte="spike",
+            message="Pic de consommation",
+            valeur=Decimal("900.00"),
+            seuil=Decimal("850.00"),
+        ),
+    ]
+
+
+def _capteurs() -> list[CapteurEtat]:
+    """État des cinq capteurs d'un site, dont un en panne annoncée.
+
+    `failing_until` est la seule information que ni `mesure` ni `null_reasons`
+    ne portent : la source annonce jusqu'à quand elle sera muette.
+    """
+    return [
+        CapteurEtat(
+            site_id=SITE_WITH_READINGS,
+            capteur=capteur,
+            statut="failing" if capteur == "temperature" else "ok",
+            failing_until=(T0 + 5 * MINUTE) if capteur == "temperature" else None,
+            overall="degraded",
+        )
+        for capteur in ("consumption", "electrical", "temperature", "humidity", "network")
+    ]
 
 
 async def modele_id_of(session: AsyncSession, version: str, nom: str) -> int:
@@ -787,3 +885,140 @@ async def indicator_sites(db_session: AsyncSession, known_model_id: int):
     ):
         await db_session.execute(statement)
     await db_session.commit()
+
+
+# Site des recommandations. Il lui faut ses propres données : les règles
+# lisent des prévisions à VENIR, et le jeu principal est figé dans le passé.
+RECO_SITE = "SITE010"
+RECO_CAPACITY_KW = Decimal("500.00")
+
+# Puissances prévues, heure par heure à partir de la prochaine. Le sommet
+# dépasse la capacité souscrite de 120 kW, soit plus du dixième qui fait
+# basculer le délestage en critique, et les deux points hauts se suivent :
+# c'est ce qui en fait une plage et non deux accidents.
+RECO_FORECAST_KW = (300.0, 450.0, 620.0, 610.0, 200.0, 180.0)
+RECO_PEAK_KW = 620.0
+RECO_OVERRUN_KW = 120.0
+
+
+def _reco_site() -> list[Site]:
+    """Site dédié aux recommandations, avec une capacité franchie."""
+    return [
+        Site(
+            site_id=RECO_SITE,
+            site_type="factory",
+            site_name="Usine de test des recommandations",
+            location="Nantes, France",
+            capacity_kw=RECO_CAPACITY_KW,
+            status="active",
+        )
+    ]
+
+
+def _reco_predictions(modele_id: int, first_hour: datetime) -> list[Prediction]:
+    """Six prévisions à venir, dont deux au-dessus de la puissance souscrite."""
+    return [
+        Prediction(
+            modele_id=modele_id,
+            site_id=RECO_SITE,
+            ts_cible=first_hour + timedelta(hours=offset),
+            consumption_kw_predite=Decimal(str(value)),
+            generated_at=first_hour,
+        )
+        for offset, value in enumerate(RECO_FORECAST_KW)
+    ]
+
+
+def _reco_readings(now: datetime) -> list[Mesure]:
+    """Six mesures récentes dont quatre reconstruites par l'ETL.
+
+    Deux tiers d'imputation : au-dessus du seuil qui tient la prévision pour
+    mal fondée. C'est le déclencheur qui n'a pas besoin que la source déclare
+    quoi que ce soit — celui qui attrape les pannes que personne n'a vues.
+    """
+    return [
+        Mesure(
+            site_id=RECO_SITE,
+            timestamp=now - timedelta(minutes=10 * (index + 1)),
+            consumption_kw=None if index < 4 else Decimal("300.00"),
+            null_reasons=["consumption_sensor_failure"] if index < 4 else [],
+            data_quality="degraded" if index < 4 else "good",
+            consumption_kw_imputed=Decimal("300.00"),
+            imputation_method="locf" if index < 4 else "none",
+            quality_source="etl",
+        )
+        for index in range(6)
+    ]
+
+
+def _reco_sensors() -> list[CapteurEtat]:
+    """Un capteur de consommation en panne déclarée sur le site."""
+    return [
+        CapteurEtat(
+            site_id=RECO_SITE,
+            capteur="consumption",
+            statut="failing",
+            failing_until=None,
+            overall="degraded",
+        )
+    ]
+
+
+@pytest.fixture
+async def recommendation_site(db_session: AsyncSession, known_model_id: int):
+    """Pose le site des recommandations, puis le retire entièrement.
+
+    Le nettoyage suit l'ordre des clés étrangères, comme `indicator_sites` :
+    les tests d'EV-11 comptent le référentiel au site près.
+    """
+    now = datetime.now(UTC)
+    first_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+    db_session.add_all(_reco_site())
+    await db_session.flush()
+    db_session.add_all(_reco_predictions(known_model_id, first_hour))
+    db_session.add_all(_reco_readings(now))
+    db_session.add_all(_reco_sensors())
+    await db_session.commit()
+
+    yield first_hour
+
+    for statement in (
+        delete(Prediction).where(Prediction.site_id == RECO_SITE),
+        delete(CapteurEtat).where(CapteurEtat.site_id == RECO_SITE),
+        delete(Mesure).where(Mesure.site_id == RECO_SITE),
+        delete(Site).where(Site.site_id == RECO_SITE),
+    ):
+        await db_session.execute(statement)
+    await db_session.commit()
+
+
+# Épisodes de panne du jeu de données : un clos, un en cours. Les deux sont
+# nécessaires — un jeu où toutes les pannes seraient closes ne distinguerait
+# pas `ongoing` d'une constante.
+PANNE_CLOSE_CAPTEUR = "humidity"
+PANNE_EN_COURS_CAPTEUR = "temperature"
+
+
+def _pannes() -> list[CapteurPanne]:
+    """Deux épisodes sur le site principal, dont un toujours ouvert.
+
+    Le second n'a pas de fin : c'est lui que vise l'index partiel unique, et
+    c'est lui qui fait des « pannes en cours » une requête d'une ligne.
+    """
+    return [
+        CapteurPanne(
+            site_id=SITE_WITH_READINGS,
+            capteur=PANNE_CLOSE_CAPTEUR,
+            debut_le=T0,
+            fin_le=T0 + 2 * MINUTE,
+            failing_until=T0 + MINUTE,
+        ),
+        CapteurPanne(
+            site_id=SITE_WITH_READINGS,
+            capteur=PANNE_EN_COURS_CAPTEUR,
+            debut_le=T0 + 3 * MINUTE,
+            fin_le=None,
+            failing_until=T0 + 5 * MINUTE,
+        ),
+    ]
