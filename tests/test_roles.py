@@ -6,9 +6,10 @@ d'écriture. Les tests montent donc leurs propres routes dans une application
 FastAPI distincte, jamais servie ni exportée. En ajouter à l'application
 livrée ferait dériver la spécification, ce que la règle numéro 1 interdit.
 
-require_role n'est encore câblée sur aucun endpoint réel : elle est livrée
-prête pour les futures écritures, et testée ici pour ne pas l'être le jour où
-elle servira.
+require_role est désormais câblée sur les écritures du contrat — pic simulé et
+synchronisation du référentiel, voir tests/test_source_relay.py. Elle reste
+testée ici sur une application jetable : ce fichier éprouve le mécanisme, pas
+les endpoints qui s'en servent.
 """
 
 from typing import Annotated

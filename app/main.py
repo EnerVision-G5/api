@@ -18,13 +18,43 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
 from app.core.config import check_cors_origins, get_cors_origins, get_jwt_secret
-from app.routers import alerts, auth, health, indicators, predictions, sites
+from app.routers import (
+    alerts,
+    auth,
+    health,
+    indicators,
+    models,
+    predictions,
+    sites,
+    source_relay,
+)
 from app.schemas.auth import UserOut
 
 # Version du contrat gelé dans enervision/docs/contracts/openapi-api.json.
 # Incrémentée en semver : patch pour une description, minor pour un champ
 # optionnel ajouté, major pour un champ retiré ou renommé.
-CONTRACT_VERSION = "1.2.0"
+#
+# 1.3.0 : trois routes additives relayant la source — déclenchement d'un pic,
+# historique des pics, synchronisation du référentiel. Les deux écritures
+# sont les premières du contrat à exiger le rôle writer.
+#
+# 1.4.0 : GET /alerts cesse de répondre 501 et sert la table `alerte` ;
+# GET /sites/{id}/sensors expose la santé des capteurs ; EnergyReadingOut
+# gagne `excluded` et `exclusion_reason`, qui rendent enfin lisible la mise
+# à l'écart que `mesure_exclu` portait sans que rien ne la publie.
+#
+# Un assouplissement, et il est délibéré : AlertOut.value et .threshold
+# passent nullables. Ils étaient déclarés requis par un contrat qu'aucune
+# réponse n'avait jamais honoré, l'endpoint répondant 501 depuis l'origine.
+# Perdre une alerte parce qu'il lui manque un chiffre serait pire que la
+# servir sans.
+#
+# 1.5.0 : quatre routes additives. L'historique des pannes de capteur, que
+# /sensors ne pouvait pas donner en ne gardant que le présent ; le registre
+# des modèles et la version promue, en base depuis le schéma v1.0 sans que
+# rien ne les lise ; et les recommandations d'action d'EV-32, que le
+# dashboard attendait sans les anticiper.
+CONTRACT_VERSION = "1.5.0"
 
 API_PREFIX = "/api/v1"
 
@@ -99,10 +129,16 @@ app.include_router(auth.router, prefix=API_PREFIX)
 app.include_router(sites.router, prefix=API_PREFIX)
 app.include_router(predictions.router, prefix=API_PREFIX)
 app.include_router(alerts.router, prefix=API_PREFIX)
+app.include_router(models.router, prefix=API_PREFIX)
 # Après sites.py, et sans conséquence : la collection des indicateurs est à
 # /indicators, au premier niveau. Un chemin littéral sous /sites serait avalé
 # par /sites/{site_id}, déclaré plus haut — voir le module.
 app.include_router(indicators.router, prefix=API_PREFIX)
+# Après sites.py, et ça compte : POST /sites/sync est un chemin littéral, que
+# GET /sites/{site_id} n'avale pas puisque la méthode diffère, mais l'ordre
+# reste celui qui se lit — le littéral après le paramétré fonctionne ici,
+# l'inverse serait à vérifier à chaque ajout.
+app.include_router(source_relay.router, prefix=API_PREFIX)
 
 
 def _normalize_error_responses(spec: dict[str, Any]) -> dict[str, Any]:

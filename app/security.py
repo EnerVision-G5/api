@@ -164,9 +164,9 @@ def require_role(
 ) -> Callable[[UserOut | None], Awaitable[UserOut | None]]:
     """Fabrique une dépendance n'admettant que les rôles donnés.
 
-    Prête pour les futurs endpoints d'écriture. Aucun endpoint du contrat
-    gelé ne l'utilise à ce jour : les quatre lectures d'EV-11 sont ouvertes à
-    tout utilisateur authentifié, et en inventer un serait sortir du contrat.
+    Câblée sur les endpoints qui écrivent : le déclenchement d'un pic et la
+    synchronisation du référentiel exigent `writer`. Les lectures d'EV-11
+    restent ouvertes à tout utilisateur authentifié, comme le contrat le dit.
     """
     allowed = frozenset(roles)
 
