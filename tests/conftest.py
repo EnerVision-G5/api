@@ -12,11 +12,11 @@ compose.test.yml en local, dans les deux cas avec l'image
 timescale/timescaledb:2.17.2-pg16, celle de la vraie base.
 
 Limite assumée : le schéma de test est construit depuis les modèles ORM
-(app.models), pas depuis les scripts d'initdb, qui vivent dans le repo infra
-et ne sont pas accessibles à la CI de ce repo sans clé de déploiement
-supplémentaire. Les modèles portent les mêmes colonnes et les mêmes CHECK, et
-test_schema_conformite verrouille les colonnes ; une divergence constatée avec
-infra/enervision-db/initdb/ est un bug des modèles.
+(app.models), pas par `alembic upgrade head`. Reconstruire par migration à
+chaque session coûterait plus cher sans rien prouver de plus sur les
+comportements testés ici. Les deux doivent rester d'accord :
+test_schema_conformite verrouille les colonnes et les index, et une divergence
+avec alembic/versions/ est un bug des modèles.
 """
 
 import os

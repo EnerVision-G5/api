@@ -1,9 +1,8 @@
 """Modèle ORM de la table app_user, utilisée par l'authentification (EV-12).
 
-Reflet en lecture du schéma figé du repo infra : 01_schema.sql pour le socle,
-04_app_user_auth.sql pour password_hash et les rôles reader / writer. Ce module
-ne fait pas évoluer le schéma, toute divergence avec ces fichiers est un bug
-à corriger ici.
+Reflet en lecture du schéma porté par `alembic/versions/` : socle v1.0,
+password_hash et les rôles reader / writer. Ce module ne fait pas évoluer le
+schéma, toute divergence avec les révisions est un bug à corriger ici.
 
 Un compte local porte oauth_provider = 'local' et oauth_subject = son username
 (ADR-009, le flux OAuth2 mot de passe a été retenu contre la fédération
