@@ -6,10 +6,10 @@ endpoint dépend — les deux colonnes d'imputation d'EV-08 sans lesquelles
 EnergyReadingOut n'est pas servable, et les deux ajouts d'EV-18 sans lesquels
 les indicateurs de confiance ne veulent rien dire.
 
-Il ne compare pas le schéma aux scripts d'initdb du repo infra, qui restent la
-source de vérité : cette comparaison demanderait un accès inter-repos que la
-CI de ce repo n'a pas. Une divergence entre ces modèles et
-infra/enervision-db/initdb/ est donc un bug à corriger ici.
+Il ne rejoue pas les migrations : le schéma testé est celui que produisent
+les modèles. C'est ce qui fait de ce fichier le point de rencontre des deux
+descriptions du schéma — si les modèles et alembic/versions/ divergent, l'une
+des deux ne satisfera plus ces assertions.
 """
 
 import pytest
@@ -80,6 +80,27 @@ INGESTION_ETAT_COLUMNS = {
 }
 
 
+# Table du périmètre gelé v1.0 (01_schema.sql). L'API ne l'écrit pas : elle est
+# alimentée par un analyste ou par l'ETL, et retirée des agrégats servis.
+MESURE_EXCLU_COLUMNS = {
+    "exclusion_id",
+    "site_id",
+    "ts",
+    "raison",
+    "exclu_par",
+    "exclu_le",
+}
+
+# Index du schéma figé. Ils ne changent aucun résultat, donc aucun test
+# fonctionnel ne les verrait manquer : seule leur absence sur une table qui
+# grossit se ferait sentir, et trop tard.
+INDEX_NAMES = {
+    "idx_mesure_quality",
+    "idx_mesure_imputation",
+    "idx_prediction_site_ts",
+}
+
+
 async def columns_of(engine: AsyncEngine, table: str) -> set[str]:
     async with engine.connect() as conn:
         result = await conn.execute(
@@ -125,6 +146,7 @@ async def test_schema_conformite(engine: AsyncEngine, seeded_database: None) -> 
     assert await columns_of(engine, "modele") == MODELE_COLUMNS
     assert await columns_of(engine, "prediction") == PREDICTION_COLUMNS
     assert await columns_of(engine, "ingestion_etat") == INGESTION_ETAT_COLUMNS
+    assert await columns_of(engine, "mesure_exclu") == MESURE_EXCLU_COLUMNS
 
 
 async def test_role_est_contraint(engine: AsyncEngine, seeded_database: None) -> None:
@@ -206,6 +228,50 @@ async def test_la_source_de_collecte_est_contrainte(
                     "INSERT INTO ingestion_etat"
                     " (site_id, last_attempt_at, source)"
                     " VALUES ('SITE001', '2026-09-02T00:00:00Z', 'a-la-main')"
+                )
+            )
+        await transaction.rollback()
+
+
+async def test_les_index_du_schema_existent(
+    engine: AsyncEngine,
+    seeded_database: None,
+) -> None:
+    """Les trois index du schéma figé sont bien créés.
+
+    Deux sont partiels : ils n'indexent que les mesures dégradées et les
+    mesures imputées, la trace d'audit, pas le volume courant. Aucun résultat
+    ne change s'ils manquent, ce qui est exactement pourquoi ils ont besoin
+    d'un test à eux.
+    """
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            text(
+                "SELECT indexname FROM pg_indexes"
+                " WHERE schemaname = 'public' AND indexname LIKE 'idx_%'"
+            )
+        )
+        assert {row[0] for row in result} == INDEX_NAMES
+
+
+async def test_une_exclusion_reference_une_mesure_existante(
+    engine: AsyncEngine,
+    seeded_database: None,
+) -> None:
+    """`mesure_exclu` ne peut pas écarter une mesure qui n'existe pas.
+
+    C'est la clé étrangère composite (site_id, ts) vers l'hypertable qui le
+    garantit. Sans elle, une exclusion posée sur un horodatage erroné
+    passerait sans bruit et retirerait des agrégats... rien du tout, en
+    laissant croire le contraire.
+    """
+    async with engine.connect() as conn:
+        transaction = await conn.begin()
+        with pytest.raises(IntegrityError):
+            await conn.execute(
+                text(
+                    "INSERT INTO mesure_exclu (site_id, ts, raison)"
+                    " VALUES ('SITE001', '1999-01-01T00:00:00Z', 'inexistante')"
                 )
             )
         await transaction.rollback()

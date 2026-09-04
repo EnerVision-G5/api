@@ -394,21 +394,41 @@ rien ne le signale — c'est exactement ce qui s'était produit sur la fraîcheu
 
 ### Migrations requises
 
-Les deux ajouts d'EV-18 vivent dans le repo infra et doivent être appliqués,
-sans quoi l'endpoint échoue sur une colonne ou une table absente :
-
-- `infra/enervision-db/initdb/06_ingestion_etat.sql`
-- `infra/enervision-db/initdb/07_mesure_quality_source.sql`
+Les colonnes et la table d'EV-18 arrivent avec `alembic upgrade head`, comme
+le reste du schéma. Sans migration jouée, l'endpoint échoue sur une colonne
+ou une table absente.
 
 `ingestion_etat` est écrite par le **collecteur** du repo predict, jamais par
 l'API : elle décrit une collecte que l'API ne fait pas.
 
 ## Migrations
 
+Le schéma appartient à ce dépôt. Il vivait auparavant dans les scripts
+`enervision-db/initdb/*.sql` du dépôt infra, joués par Postgres au seul
+premier démarrage d'un conteneur sur un volume vide — un chemin qui ne
+permettait aucune évolution d'une base en service. `alembic/versions/`
+reprend cet état à l'identique et le remplace.
+
 ```bash
 make revision m="create site table"   # autogenerate
 make migrate                          # alembic upgrade head
 ```
+
+Deux révisions au départ :
+
+| Révision | Contenu |
+|---|---|
+| `0001_schema_v1` | schéma figé v1.0 complet : extension TimescaleDB, 7 tables, hypertable `mesure`, index, commentaires |
+| `0002_seed_sites` | référentiel des 7 sites, sans lequel aucune clé étrangère ne passe |
+
+Trois objets ne vivent pas dans `Base.metadata` et sont donc écrits à la main
+dans la révision : l'extension `timescaledb`, la conversion de `mesure` en
+hypertable, et les index partiels. Un `--autogenerate` ne les produira jamais
+— le vérifier avant de committer une révision générée.
+
+Équivalence vérifiée : sur `timescale/timescaledb:2.17.2-pg16`, le `pg_dump
+--schema-only` d'une base construite par `alembic upgrade head` est identique
+à celui d'une base construite par les sept scripts `initdb`.
 
 ## Contrat OpenAPI
 
