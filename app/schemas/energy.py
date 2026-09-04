@@ -17,6 +17,15 @@ from app.schemas.common import DataQuality, PaginationMeta
 AlertSeverity = Literal["low", "medium", "high", "critical"]
 AlertType = Literal["spike", "threshold", "anomaly", "outage", "sensor"]
 ImputationMethod = Literal["none", "locf", "interpolation"]
+SensorName = Literal[
+    "consumption",
+    "electrical",
+    "temperature",
+    "humidity",
+    "network",
+]
+SensorStatus = Literal["ok", "failing"]
+SensorOverall = Literal["ok", "degraded", "critical"]
 
 
 class SiteOut(BaseModel):
@@ -77,6 +86,22 @@ class EnergyReadingOut(BaseModel):
             " locf pour un report de la dernière valeur connue, interpolation sinon."
         ),
     )
+    excluded: bool = Field(
+        default=False,
+        description=(
+            "Vrai si la mesure a été écartée des calculs agrégés. Une mesure"
+            " écartée reste servie telle quelle : c'est le consommateur qui décide"
+            " de la retirer de ses moyennes, pas l'API de la cacher."
+        ),
+    )
+    exclusion_reason: str | None = Field(
+        default=None,
+        description=(
+            "Motif de la mise à l'écart, nul si la mesure n'est pas écartée."
+            " Distinct de null_reasons, qui dit ce qui manquait à la mesure là où"
+            " celui-ci dit pourquoi elle a été jugée inexploitable."
+        ),
+    )
 
 
 class ReadingsPage(BaseModel):
@@ -91,7 +116,12 @@ class ReadingsPage(BaseModel):
 
 
 class AlertOut(BaseModel):
-    """Alerte énergétique, miroir de l'alerte de l'API Mock IoT."""
+    """Alerte énergétique, miroir de l'alerte de l'API Mock IoT.
+
+    `timestamp` date le déclenchement côté source, pas la collecte. Les deux
+    s'écartent dès qu'un collecteur a été arrêté, et c'est le déclenchement
+    qui intéresse le consommateur.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -101,5 +131,82 @@ class AlertOut(BaseModel):
     severity: AlertSeverity = Field(description="Gravité de l'alerte.")
     type: AlertType = Field(description="Nature de l'anomalie détectée.")
     message: str = Field(description="Description de l'alerte fournie par la source.")
-    value: float = Field(description="Valeur mesurée ayant déclenché l'alerte.")
-    threshold: float = Field(description="Seuil dont le dépassement a déclenché l'alerte.")
+    # Nullables, alors que la source les sert toujours aujourd'hui. Une alerte
+    # de type `sensor` n'a pas de seuil à dépasser, et surtout : perdre une
+    # alerte parce qu'il lui manque un chiffre serait pire que la servir sans.
+    value: float | None = Field(
+        default=None,
+        description="Valeur mesurée ayant déclenché l'alerte, nulle si non servie.",
+    )
+    threshold: float | None = Field(
+        default=None,
+        description="Seuil dont le dépassement a déclenché l'alerte, nul si non servi.",
+    )
+
+
+class SensorHealthOut(BaseModel):
+    """État d'un capteur d'un site, tel que la source le déclare.
+
+    Complète `null_reasons` sans le remplacer : celui-ci dit ce qui manquait à
+    une mesure, celui-là dit quel capteur est en cause et jusqu'à quand la
+    source annonce qu'il le restera. Un capteur qui tombe entre deux mesures
+    n'apparaît que dans le second.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    site_id: str = Field(description="Identifiant du site concerné.")
+    capteur: SensorName = Field(description="Capteur décrit.")
+    statut: SensorStatus = Field(description="État du capteur : ok ou failing.")
+    failing_until: datetime | None = Field(
+        default=None,
+        description=(
+            "Date de rétablissement annoncée par la source, nulle quand le"
+            " capteur fonctionne."
+        ),
+    )
+    overall: SensorOverall = Field(
+        description=(
+            "Synthèse du site : ok si tous les capteurs répondent, degraded si"
+            " l'un d'eux est tombé, critical en cas de perte réseau."
+        ),
+    )
+    releve_le: datetime = Field(
+        description=(
+            "Dernier passage du collecteur sur cet état, ISO 8601 UTC. Un état"
+            " ancien dit que la collecte s'est tue, pas que le capteur va bien."
+        ),
+    )
+
+
+class SensorFailureOut(BaseModel):
+    """Épisode de panne d'un capteur, borné par son début et sa fin.
+
+    `started_at` est l'instant où le collecteur a CONSTATÉ la panne, pas celui
+    où elle a commencé : la source dit `failing` au présent, jamais depuis
+    quand. Un collecteur arrêté décale donc ce début, et le confondre avec le
+    début réel ferait passer une interruption de collecte pour un capteur sain.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    site_id: str = Field(description="Identifiant du site concerné.")
+    capteur: SensorName = Field(description="Capteur tombé en panne.")
+    started_at: datetime = Field(
+        description="Constat de la panne par le collecteur, ISO 8601 UTC.",
+    )
+    ended_at: datetime | None = Field(
+        default=None,
+        description="Constat du rétablissement, nul tant que la panne dure.",
+    )
+    failing_until: datetime | None = Field(
+        default=None,
+        description=(
+            "Dernière date de rétablissement annoncée par la source pendant"
+            " l'épisode. Une prévision, pas un constat : elle peut être dépassée"
+            " alors que la panne dure encore."
+        ),
+    )
+    ongoing: bool = Field(
+        description="Vrai tant que le collecteur n'a pas constaté le retour à ok.",
+    )

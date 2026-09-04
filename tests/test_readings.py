@@ -37,6 +37,11 @@ READING_FIELDS = {
     "data_quality",
     "consumption_kw_imputed",
     "imputation_method",
+    # Ajoutés en 1.4.0 : la mise à l'écart était en base depuis EV-08 sans que
+    # rien ne la publie, et `null_reasons` ne la remplace pas — il dit ce qui
+    # manquait à la mesure, pas pourquoi elle a été jugée inexploitable.
+    "excluded",
+    "exclusion_reason",
 }
 
 FULL_WINDOW = {
