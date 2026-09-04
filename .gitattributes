@@ -1,0 +1,6 @@
+# Scripts joués dans un conteneur Linux. Sans cette règle, un checkout
+# Windows (core.autocrlf=true) les réécrit en CRLF, docker build embarque le
+# CRLF, et le conteneur refuse de démarrer sur un shebang "#!/bin/sh\r"
+# introuvable. Le symptôme ne se voit qu'à l'exécution, pas au build.
+*.sh text eol=lf
+Dockerfile* text eol=lf
