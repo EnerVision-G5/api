@@ -430,6 +430,23 @@ hypertable, et les index partiels. Un `--autogenerate` ne les produira jamais
 --schema-only` d'une base construite par `alembic upgrade head` est identique
 à celui d'une base construite par les sept scripts `initdb`.
 
+### Application au démarrage
+
+L'image de production applique ses migrations elle-même : `entrypoint.sh`
+lance `alembic upgrade head` avant de passer la main à uvicorn. Le
+déploiement n'a rien à savoir des migrations, il démarre un conteneur.
+
+`upgrade head` lit `alembic_version` : sur une base déjà à jour il ne fait
+rien et l'API démarre. Ce n'est pas un rejeu à chaque redémarrage, c'est une
+vérification.
+
+Une migration qui échoue — base injoignable comprise — arrête le conteneur
+avec un code non nul plutôt que de servir sur un schéma incomplet. C'est la
+politique `restart: unless-stopped` du compose qui fait office de réessai.
+
+`predict-cron` partage cette image mais écrase `entrypoint` dans son compose :
+il ne migre pas, et c'est voulu — une seule chose fait évoluer le schéma.
+
 ## Contrat OpenAPI
 
 La source de vérité du contrat, ce sont les DTO de `app/schemas`. Le fichier
