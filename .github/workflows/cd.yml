@@ -69,25 +69,66 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Base du smoke test. Depuis que l'entrypoint applique les migrations,
+      # l'image ne peut plus démarrer sans base : elle sortait en erreur sur
+      # une résolution DNS avant même d'ouvrir le port, et le smoke test ne
+      # mesurait plus que ça.
+      #
+      # Même image que la base de production : la révision 0001 crée
+      # l'extension timescaledb et une hypertable, un Postgres nu les
+      # refuserait.
+      - name: Démarrer la base du smoke test
+        run: |
+          docker network create smoke-net
+          docker run -d --name smoke-db --network smoke-net \
+            -e POSTGRES_USER=smoke \
+            -e POSTGRES_PASSWORD=smoke \
+            -e POSTGRES_DB=smoke \
+            -e TIMESCALEDB_TELEMETRY=off \
+            --health-cmd 'pg_isready -U smoke -d smoke' \
+            --health-interval 5s \
+            --health-timeout 5s \
+            --health-retries 10 \
+            timescale/timescaledb:2.17.2-pg16
+          ok=0
+          for _ in $(seq 1 60); do
+            if [ "$(docker inspect -f '{{.State.Health.Status}}' smoke-db)" \
+                 = healthy ]; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ok" = 1
+
       # Vérifie que l'image publiée démarre seule (aucune dépendance au poste de
-      # dev), écoute sur le port attendu et lit sa config depuis l'environnement.
+      # dev), porte son schéma jusqu'à head, écoute sur le port attendu et lit
+      # sa config depuis l'environnement.
       - name: Smoke test de l'image publiée
         run: |
           ref="${IMAGE}@${{ steps.build.outputs.digest }}"
-          docker run -d --name api-smoke -p 8080:8080 \
+          docker run -d --name api-smoke --network smoke-net -p 8080:8080 \
             -e ENVIRONMENT=production \
-            -e DATABASE_URL='postgresql+asyncpg://smoke:smoke@db:5432/smoke' \
+            -e DATABASE_URL='postgresql+asyncpg://smoke:smoke@smoke-db:5432/smoke' \
             -e JWT_SECRET='ci-smoke-throwaway-not-a-real-jwt-secret-0123456789' \
             "$ref"
           ok=0
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 60); do
             if curl -fsS http://localhost:8080/api/v1/health; then ok=1; break; fi
             sleep 1
           done
           echo
           docker logs api-smoke
-          docker rm -f api-smoke >/dev/null
           test "$ok" = 1
+
+      # Toujours exécuté : un smoke test rouge doit laisser le runner propre,
+      # et les journaux de la base expliquent souvent l'échec de l'API.
+      - name: Nettoyer le smoke test
+        if: always()
+        run: |
+          docker logs smoke-db 2>&1 | tail -n 50 || true
+          docker rm -f api-smoke smoke-db >/dev/null 2>&1 || true
+          docker network rm smoke-net >/dev/null 2>&1 || true
 
       - name: Récapitulatif
         run: |
