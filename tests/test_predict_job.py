@@ -618,3 +618,28 @@ class TestRegistreVide:
         # le rôle du code de sortie. C'est le NIVEAU de journal qui change.
         assert code == 1
         assert await count_predictions(clean_predictions) == 0
+
+
+# --- Clé de service présentée au service d'inférence -------------------------
+#
+# Le service d'inférence relaie POST /api/v1/simulate/spike, qui écrit sur la
+# source : il exige une clé sur les routes du contrat. Sans elle, tous les
+# appels de l'API reviennent en 401 et le dashboard perd ses prédictions.
+
+
+def test_la_cle_de_service_est_presentee_quand_elle_est_configuree() -> None:
+    from app.predict_client import API_KEY_HEADER, service_headers
+
+    assert service_headers("une-cle") == {API_KEY_HEADER: "une-cle"}
+
+
+def test_aucune_cle_ne_produit_aucun_en_tete() -> None:
+    """Envoyer une chaîne vide rendrait le journal du service illisible.
+
+    Il distingue « en-tête absent » de « clé fausse » ; une clé vide se
+    présenterait comme une clé fausse alors que c'est le mode ouvert du poste
+    de développement.
+    """
+    from app.predict_client import service_headers
+
+    assert service_headers("") == {}
