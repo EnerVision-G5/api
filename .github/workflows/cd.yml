@@ -1,22 +1,22 @@
 name: cd
 
-# Livraison de l'image Docker de l'API.
-#
-# À chaque poussée sur master (donc à chaque merge intégré), on rejoue d'abord
-# l'intégralité de la CI (ruff + pytest + dérive du contrat) puis, seulement si
-# elle passe, on construit l'image de production et on la publie sur GHCR en la
-# taguant avec le SHA Git.
+# Livraison de l'image Docker de l'API : à chaque push sur master, et à la
+# demande pour republier un commit déjà intégré (image de base corrigée, run
+# précédent tombé au smoke test). Dans les deux cas la CI complète est rejouée
+# d'abord ; rien n'est construit si elle échoue.
 on:
   push:
     branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: cd-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  # Barrière qualité : réutilise ci.yml tel quel. `build` ne démarre pas tant
-  # que ruff, pytest et le job contract-drift ne sont pas verts.
   ci:
     uses: ./.github/workflows/ci.yml
     secrets: inherit
@@ -29,24 +29,22 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # Nom d'image en minuscules (GHCR l'exige, le nom de repo peut contenir
-      # des majuscules).
+      # GHCR exige un nom d'image en minuscules.
       - name: Préparer la référence d'image
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
       - name: Connexion à GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          # Jeton éphémère fourni par Actions, jamais stocké dans l'image.
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Calculer tags et labels
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.IMAGE }}
           tags: |
@@ -54,11 +52,11 @@ jobs:
             type=raw,value=latest
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Build & push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: ./Dockerfile
@@ -69,27 +67,23 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Base du smoke test. Depuis que l'entrypoint applique les migrations,
-      # l'image ne peut plus démarrer sans base : elle sortait en erreur sur
-      # une résolution DNS avant même d'ouvrir le port, et le smoke test ne
-      # mesurait plus que ça.
-      #
-      # Même image que la base de production : la révision 0001 crée
-      # l'extension timescaledb et une hypertable, un Postgres nu les
-      # refuserait.
+      # L'entrypoint applique les migrations : l'image ne démarre pas sans base.
+      # Même image que la production (extension timescaledb, hypertable), sur la
+      # boucle locale du runner et détruite avec lui, d'où l'absence de mot de
+      # passe.
       - name: Démarrer la base du smoke test
         run: |
           docker network create smoke-net
           docker run -d --name smoke-db --network smoke-net \
             -e POSTGRES_USER=smoke \
-            -e POSTGRES_PASSWORD=smoke \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
             -e POSTGRES_DB=smoke \
             -e TIMESCALEDB_TELEMETRY=off \
             --health-cmd 'pg_isready -U smoke -d smoke' \
             --health-interval 5s \
             --health-timeout 5s \
             --health-retries 10 \
-            timescale/timescaledb:2.17.2-pg16
+            timescale/timescaledb:2.17.2-pg16@sha256:4e459e217f00cbb09920c34d245501e63427e6767a495de57ce76823ff280f12
           ok=0
           for _ in $(seq 1 60); do
             if [ "$(docker inspect -f '{{.State.Health.Status}}' smoke-db)" \
@@ -101,16 +95,15 @@ jobs:
           done
           test "$ok" = 1
 
-      # Vérifie que l'image publiée démarre seule (aucune dépendance au poste de
-      # dev), porte son schéma jusqu'à head, écoute sur le port attendu et lit
-      # sa config depuis l'environnement.
+      # L'image doit démarrer seule, porter son schéma jusqu'à head et écouter
+      # sur le port attendu. Clé de signature tirée au sort, jetée avec le runner.
       - name: Smoke test de l'image publiée
         run: |
           ref="${IMAGE}@${{ steps.build.outputs.digest }}"
           docker run -d --name api-smoke --network smoke-net -p 8080:8080 \
             -e ENVIRONMENT=production \
-            -e DATABASE_URL='postgresql+asyncpg://smoke:smoke@smoke-db:5432/smoke' \
-            -e JWT_SECRET='ci-smoke-throwaway-not-a-real-jwt-secret-0123456789' \
+            -e DATABASE_URL='postgresql+asyncpg://smoke@smoke-db:5432/smoke' \
+            -e JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')" \
             "$ref"
           ok=0
           for _ in $(seq 1 60); do
@@ -121,8 +114,7 @@ jobs:
           docker logs api-smoke
           test "$ok" = 1
 
-      # Toujours exécuté : un smoke test rouge doit laisser le runner propre,
-      # et les journaux de la base expliquent souvent l'échec de l'API.
+      # Les journaux de la base expliquent souvent l'échec de l'API.
       - name: Nettoyer le smoke test
         if: always()
         run: |
