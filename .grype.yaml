@@ -1,0 +1,20 @@
+# Exceptions du scan Grype (job sca-grype, bloquant sur High/Critical corrigeables).
+# Chaque entrée est une dérogation datée, justifiée dans SECURITY.md, à retirer
+# dès que le correctif est appliqué. Une CVE absente d'ici fait échouer la CI.
+ignore:
+  # starlette 0.49.3 : correctifs en 1.1.0 et 1.3.1, hors de la plage imposée
+  # par fastapi 0.121.2 ; la montée passe par une PR de contrat. Réexamen 2026-09-13.
+  - vulnerability: GHSA-82w8-qh3p-5jfq
+  - vulnerability: GHSA-wqp7-x3pw-xc5r
+  # python-multipart 0.0.20 : correctifs en 0.0.22, 0.0.27 et 0.0.30, montée
+  # sans incidence sur le contrat, à faire par une PR de dépendances.
+  # Réexamen 2026-09-13.
+  - vulnerability: GHSA-wp53-j4wj-2cfg
+  - vulnerability: GHSA-pp6c-gr5w-3c5g
+  - vulnerability: GHSA-5rvq-cxj2-64vf
+  # Interpréteur de python:3.12-slim : les correctifs publiés visent 3.13 et
+  # 3.14, aucune 3.12.x corrigée au 2026-09-05 ; suivre l'image de base.
+  # Réexamen 2026-09-13.
+  - vulnerability: CVE-2026-3644
+  - vulnerability: CVE-2026-4224
+  - vulnerability: CVE-2026-7210
