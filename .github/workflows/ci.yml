@@ -5,6 +5,7 @@ name: ci
 # master est donc testé une fois, pas deux.
 on:
   pull_request:
+    branches-ignore: [master]
   push:
     branches: [develop]
   workflow_call:
