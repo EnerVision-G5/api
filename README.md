@@ -91,7 +91,35 @@ make test        # base de test + pytest
 ```
 
 Ces deux commandes tournent dans la CI (job `lint-and-test` de
-`.github/workflows/ci.yml`, qui fournit la base par un service container).
+`.github/workflows/ci.yml`, qui fournit la base par un service container sans
+mot de passe : elle vit sur la boucle locale du runner et meurt avec lui).
+
+### Intégration et livraison continues
+
+`ci.yml` tourne sur chaque pull request et sur `develop` après fusion.
+`lint-and-test` passe d'abord ; les trois autres jobs n'ont de sens que sur un
+code qui passe ses tests et attendent son vert :
+
+| Job | Vérifie | Bloquant |
+| --- | --- | --- |
+| `lint-and-test` | `ruff`, `pytest` contre TimescaleDB, génération de la spécification | oui |
+| `contract-drift` | le code n'a pas dérivé du contrat gelé d'`enervision` | oui |
+| `sca-grype` | aucune CVE High/Critical **corrigeable** dans l'image, hors `.grype.yaml` | oui |
+| `dast-zap` | aucune alerte ZAP sur l'API démarrée, hors `.zap/rules.tsv` | oui |
+
+Les deux scans sont bloquants : une alerte se traite, ou s'inscrit comme
+dérogation datée dans `.grype.yaml` ou `.zap/rules.tsv`, avec sa justification
+dans `SECURITY.md`. Il n'y a pas de troisième état.
+
+`cd.yml` tourne sur chaque push sur `master` et à la demande (*Actions → cd →
+Run workflow*). Il rejoue `ci.yml` en entier, puis construit l'image et la
+publie sur GHCR sous `sha-<git-sha>` ; un push sur `master` est donc testé une
+fois, par la CD. Le `GITHUB_TOKEN` n'a que `contents: read`, sauf le job de
+publication qui ajoute `packages: write`.
+
+Actions et images tierces sont épinglées sur un commit ou un digest, la
+version lisible en commentaire. Les monter est un changement relu comme un
+autre.
 
 Les tests des endpoints de lecture interrogent une **vraie base** PostgreSQL /
 TimescaleDB, pas un double : le tri sur hypertable, le `TEXT[]` de

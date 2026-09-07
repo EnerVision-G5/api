@@ -1,43 +1,41 @@
 name: ci
 
-# Déclenchée uniquement par pull request : sur une branche de travail, chaque
-# push rejouait la CI sans que personne ne lise le résultat avant l'ouverture
-# de la PR. Conséquence assumée : un push direct sur une branche protégée
-# n'est plus testé, le passage par une PR devient la seule voie contrôlée.
-# workflow_call est conservé : cd.yml appelle cette CI juste avant le build de
-# l'image, donc rien n'est publié sans avoir été testé.
+# Sur chaque pull request et sur develop après fusion. master n'est pas listé :
+# cd.yml rejoue cette CI en entier avant de construire l'image, un push sur
+# master est donc testé une fois, pas deux.
 on:
   pull_request:
-  # Réutilisable : cd.yml appelle ce workflow pour garder une seule définition
-  # des étapes lint / test / build / dérive du contrat.
+    branches-ignore: [master]
+  push:
+    branches: [develop]
   workflow_call:
+
+permissions:
+  contents: read
 
 env:
   # Branche du repo enervision qui porte le contrat gelé de référence.
   CONTRACTS_REF: develop
+  # Même image et même version que la base d'exploitation : tri sur
+  # hypertable, TEXT[] et NUMERIC se comportent en CI comme en production.
+  TIMESCALEDB_IMAGE: timescale/timescaledb:2.17.2-pg16@sha256:4e459e217f00cbb09920c34d245501e63427e6767a495de57ce76823ff280f12
 
 jobs:
-  # EV-02 et EV-38 demandaient tous deux un job lint + tests. Un seul est
-  # conservé, celui déjà sur develop, dont les outils sont épinglés par
-  # requirements-dev.txt. EV-02 y ajoute le checkout récursif des submodules et
-  # l'étape de build, qui pour ce repo est la génération de la spécification.
   lint-and-test:
     name: ruff + pytest + build
     runs-on: ubuntu-latest
 
-    # Les tests des endpoints de lecture (EV-11) interrogent une vraie base et
-    # non un double. Même image et même version que la base d'exploitation,
-    # pour que le tri sur hypertable, le TEXT[] de null_reasons et les NUMERIC
-    # se comportent en CI comme en production.
+    # Les tests des endpoints de lecture interrogent une vraie base, pas un
+    # double. Base éphémère sur la boucle locale du runner, détruite avec lui :
+    # un mot de passe n'y protégerait rien et ne serait qu'une valeur en clair
+    # de plus dans le dépôt, d'où l'authentification `trust`.
     services:
       test-db:
-        image: timescale/timescaledb:2.17.2-pg16
+        image: timescale/timescaledb:2.17.2-pg16@sha256:4e459e217f00cbb09920c34d245501e63427e6767a495de57ce76823ff280f12
         env:
           POSTGRES_DB: enervision_test
           POSTGRES_USER: enervision
-          # Base éphémère, détruite avec le runner : ce mot de passe ne protège
-          # rien, il n'a pas sa place dans les secrets du repo.
-          POSTGRES_PASSWORD: enervision
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5433:5432
         options: >-
@@ -47,11 +45,11 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
           cache: pip
@@ -64,21 +62,24 @@ jobs:
 
       - name: pytest
         env:
-          TEST_DATABASE_URL: postgresql+asyncpg://enervision:enervision@localhost:5433/enervision_test
+          TEST_DATABASE_URL: postgresql+asyncpg://enervision@localhost:5433/enervision_test
         run: pytest
 
       - name: Build (génération de la spécification OpenAPI)
         run: python scripts/export_openapi.py > /dev/null
 
+  # Comparer au contrat un code dont les tests échouent n'apprend rien : le
+  # contrat et les scans attendent le vert de lint-and-test.
   contract-drift:
     name: Dérive du contrat OpenAPI
+    needs: lint-and-test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
           cache: pip
@@ -87,16 +88,14 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Récupérer le contrat gelé
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: EnerVision-G5/enervision
           ref: ${{ env.CONTRACTS_REF }}
           path: enervision
-          # Le GITHUB_TOKEN par défaut ne lit pas les autres repos privés de
-          # l'organisation. On passe par une clé de déploiement en lecture seule
-          # posée sur enervision, dont la partie privée est le secret ci-dessous.
-          # Une clé de déploiement n'est liée à aucun compte, contrairement à un
-          # PAT qui expire ou disparaît avec le départ de son porteur.
+          # Le GITHUB_TOKEN ne lit pas les autres dépôts privés de l'organisation :
+          # clé de déploiement en lecture seule posée sur enervision, qui ne
+          # dépend d'aucun compte.
           ssh-key: ${{ secrets.CONTRACTS_SSH_KEY }}
 
       - name: Comparer le code au contrat gelé
@@ -105,42 +104,30 @@ jobs:
           diff -u enervision/docs/contracts/openapi-api.json /tmp/openapi-current.json \
             || { echo "::error::Le code a dérivé du contrat gelé. Ouvrir une PR sur enervision/docs/contracts ou corriger le code."; exit 1; }
 
-  # Analyse de composition logicielle. L'image de production est scannée plutôt
-  # que requirements.txt seul : les CVE arrivent aussi par la base
-  # python:3.12-slim, que le lock du projet ne décrit pas.
+  # Bloquant sur les CVE High et Critical qui ont un correctif. Les exceptions
+  # vivent dans .grype.yaml, datées et justifiées dans SECURITY.md.
   sca-grype:
-    name: Grype (CVE de l'image)
+    name: Grype (CVE corrigeables de l'image)
+    needs: lint-and-test
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Scan informatif, sur décision d'équipe : une alerte est visible en échec
-    # mais ne bloque pas la CI. Les dérogations argumentées et datées restent
-    # dans SECURITY.md, qui documente notamment les CVE de starlette que la
-    # contrainte de version de FastAPI empêche de corriger.
-    continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # Même Dockerfile que la livraison : ce qui est scanné ici est ce qui
-      # sera publié par cd.yml, à l'identique.
+      # Même Dockerfile que cd.yml : ce qui est scanné est ce qui sera publié.
       - name: Construire l'image à scanner
         run: docker build -t enervision-api:scan .
 
       - name: Grype
-        uses: anchore/scan-action@v6
+        uses: anchore/scan-action@1638637db639e0ade3258b51db49a9a137574c3e # v6.5.1
         with:
           image: enervision-api:scan
-          # Bloque la CI sur High et Critical seulement, et seulement si un
-          # correctif existe : une CVE sans version corrigée n'est pas une
-          # action possible, la signaler bloquerait toutes les PR sans que
-          # personne ne puisse la lever.
           severity-cutoff: high
           only-fixed: true
           fail-build: true
           output-format: table
           output-file: grype-report.txt
 
-      # always() : ces deux étapes doivent tourner même quand Grype a bloqué,
-      # sinon le rapport qui explique l'échec n'est jamais publié.
       - name: Récapitulatif
         if: always()
         run: |
@@ -154,37 +141,28 @@ jobs:
 
       - name: Publier le rapport
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: grype-report
           path: grype-report.txt
           if-no-files-found: warn
 
-  # Scan dynamique (DAST) : l'API est réellement démarrée, puis attaquée par
-  # ZAP à partir de sa propre spécification OpenAPI, donc sur les vraies routes
-  # et les vrais paramètres plutôt que sur une exploration à l'aveugle.
+  # Scan dynamique : l'API est démarrée puis attaquée par ZAP à partir de sa
+  # propre spécification OpenAPI. Bloquant : toute alerte absente de
+  # .zap/rules.tsv fait échouer le job.
   dast-zap:
     name: OWASP ZAP (scan de l'API)
+    needs: lint-and-test
     runs-on: ubuntu-latest
-    # Le scan actif interroge chaque opération du contrat : il dure quelques
-    # minutes, et une borne évite qu'un blocage ne consomme l'heure complète.
     timeout-minutes: 30
-    # Scan informatif, sur décision d'équipe : une alerte est visible en échec
-    # mais ne bloque pas la CI. Les dérogations argumentées et datées restent
-    # dans SECURITY.md, qui documente notamment les CVE de starlette que la
-    # contrainte de version de FastAPI empêche de corriger.
-    continue-on-error: true
 
-    # Base éphémère, comme pour pytest : sans schéma, chaque route de lecture
-    # répondrait 500 et le scan ne mesurerait que la page d'erreur. Port 5434
-    # pour ne pas entrer en conflit avec le 5433 du job de tests.
     services:
       scan-db:
-        image: timescale/timescaledb:2.17.2-pg16
+        image: timescale/timescaledb:2.17.2-pg16@sha256:4e459e217f00cbb09920c34d245501e63427e6767a495de57ce76823ff280f12
         env:
           POSTGRES_DB: enervision_scan
           POSTGRES_USER: enervision
-          POSTGRES_PASSWORD: enervision
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5434:5432
         options: >-
@@ -194,15 +172,15 @@ jobs:
           --health-retries 10
 
     env:
-      DATABASE_URL: postgresql+asyncpg://enervision:enervision@localhost:5434/enervision_scan
+      DATABASE_URL: postgresql+asyncpg://enervision@localhost:5434/enervision_scan
       SCAN_TARGET: http://127.0.0.1:8080
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
           cache: pip
@@ -210,23 +188,21 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # Le schéma vient des migrations, pas d'un create_all : le scan
-      # rencontre ainsi la base que produit un vrai déploiement, index et
-      # hypertable compris.
+      # Les migrations, pas un create_all : le scan rencontre la base que
+      # produit un vrai déploiement.
       - name: Construire le schéma de la base éphémère
         run: alembic upgrade head
 
       - name: Démarrer l'API à scanner
         env:
           ENVIRONMENT: ci
-          # Clé jetée avec le runner : elle ne signe que le trafic du scan.
-          JWT_SECRET: cle-de-signature-ephemere-du-scan-zap-ci
-          # Volontairement désactivée, et uniquement ici : sous JWT, ZAP ne
-          # verrait que des 401 et ne testerait aucun handler. Ce réglage ne
-          # sort pas de ce job, la CD publie l'image sans y toucher.
+          # Sous JWT, ZAP ne verrait que des 401 et ne testerait aucun handler.
+          # Réglage propre à ce job : la CD publie l'image sans y toucher.
           AUTH_ENABLED: "false"
         run: |
-          nohup uvicorn app.main:app --host 127.0.0.1 --port 8080 \
+          # Clé de signature tirée au sort et jetée avec le runner.
+          JWT_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" \
+            nohup uvicorn app.main:app --host 127.0.0.1 --port 8080 \
             > uvicorn.log 2>&1 &
           ok=0
           for _ in $(seq 1 30); do
@@ -239,23 +215,16 @@ jobs:
           cat uvicorn.log
           test "$ok" = 1
 
-      # Codes de sortie de zap-api-scan.py : 1 si une règle FAIL est
-      # déclenchée, 2 si une alerte reste en WARN, donc toute alerte non listée
-      # dans .zap/rules.tsv casse le job. Pour rendre le scan informatif au lieu
-      # de bloquant, ajouter -I à la commande ci-dessous.
-      #
-      # ZAP tourne dans son propre conteneur : --network host pour qu'il
-      # atteigne l'uvicorn du runner, et /zap/wrk monté sur un répertoire du
-      # workspace pour en ressortir les rapports. Le conteneur écrit sous un
-      # autre uid que le runner, d'où le chmod.
+      # --network host pour atteindre l'uvicorn du runner. Le conteneur écrit
+      # ses rapports sous l'uid 1000 alors que le runner est 1001 : le
+      # répertoire dédié, vide et jeté avec le job, est ouvert en écriture.
       - name: OWASP ZAP
         run: |
-          mkdir -p zap-report
+          install -d -m 0777 zap-report
           cp .zap/rules.tsv zap-report/rules.tsv
-          chmod -R 777 zap-report
           docker run --rm --network host \
             -v "$PWD/zap-report:/zap/wrk:rw" \
-            ghcr.io/zaproxy/zaproxy:stable \
+            ghcr.io/zaproxy/zaproxy:2.17.0@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef \
             zap-api-scan.py \
               -t "$SCAN_TARGET/openapi.json" \
               -f openapi \
@@ -275,7 +244,7 @@ jobs:
 
       - name: Publier le rapport
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: zap-report
           path: |
