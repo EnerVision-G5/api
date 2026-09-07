@@ -21,7 +21,6 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
-    ForeignKeyConstraint,
     Identity,
     Index,
     Integer,
@@ -172,13 +171,13 @@ class MesureExclu(Base):
     """Mesure écartée des calculs agrégés (périmètre gelé v1.0).
 
     L'API ne l'ecrit pas : l'exclusion est posée par un analyste ou par
-    l'ETL. Elle est déclarée ici parce qu'elle appartient au schéma, que sa
-    clé étrangère composite vers l'hypertable en dépend, et que le schéma
-    des tests doit être complet.
+    l'ETL. Elle est déclarée ici parce qu'elle appartient au schéma, et que
+    celui des tests doit être complet.
 
-    La référence se fait par la clé naturelle (site_id, ts) : `mesure` n'a
-    pas d'identifiant de substitution, la contrainte TimescaleDB imposant
-    d'inclure la colonne de partitionnement dans toute clé.
+    La référence à `mesure` se fait par la clé naturelle (site_id, ts) :
+    l'hypertable n'a pas d'identifiant de substitution, la contrainte
+    TimescaleDB imposant d'inclure la colonne de partitionnement dans toute
+    clé. Elle n'est plus portée par une clé étrangère — voir ci-dessous.
     """
 
     __tablename__ = "mesure_exclu"
@@ -186,13 +185,17 @@ class MesureExclu(Base):
         # Une mesure n'est exclue qu'une fois : c'est ce qui rend l'écriture
         # de l'ETL rejouable sans produire de doublon.
         UniqueConstraint("site_id", "ts", name="mesure_exclu_site_id_ts_key"),
-        # FK composite vers l'hypertable, supportée depuis TimescaleDB 2.16
-        # (image épinglée : 2.17.2).
-        ForeignKeyConstraint(
-            ["site_id", "ts"],
-            ["mesure.site_id", "mesure.ts"],
-            name="mesure_exclu_site_id_ts_fkey",
-        ),
+        # Pas de clé étrangère vers `mesure`, et ce n'est pas un oubli :
+        # TimescaleDB 2.16 accepte de la POSER sur une hypertable, mais elle ne
+        # tient pas à l'usage. La vérification passe par le cache de plans de
+        # PostgreSQL, et le plan générique qu'il retient à partir de la sixième
+        # exécution ne sait plus exclure les chunks : la ligne référencée n'est
+        # pas trouvée, et une insertion valide est rejetée. Une journée de
+        # panne réseau sur un site fait 1440 exclusions, donc l'échec est
+        # certain. Retirée par la révision 0006, qui détaille le mécanisme.
+        #
+        # L'invariant est tenu par l'ETL, seul écrivain de cette table, qui
+        # écrit `mesure` avant les exclusions (etl/load.py).
     )
 
     exclusion_id: Mapped[int] = mapped_column(

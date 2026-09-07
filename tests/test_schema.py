@@ -12,10 +12,14 @@ descriptions du schéma — si les modèles et alembic/versions/ divergent, l'un
 des deux ne satisfera plus ces assertions.
 """
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
+
+from tests.conftest import SITE_WITH_READINGS
 
 pytestmark = pytest.mark.anyio
 
@@ -316,24 +320,59 @@ async def test_les_index_du_schema_existent(
         assert {row[0] for row in result} == INDEX_NAMES
 
 
-async def test_une_exclusion_reference_une_mesure_existante(
+async def test_un_lot_d_exclusions_passe_au_dela_du_seuil_du_cache_de_plans(
     engine: AsyncEngine,
     seeded_database: None,
 ) -> None:
-    """`mesure_exclu` ne peut pas écarter une mesure qui n'existe pas.
+    """Un lot d'exclusions s'écrit d'un bloc, quel que soit son nombre.
 
-    C'est la clé étrangère composite (site_id, ts) vers l'hypertable qui le
-    garantit. Sans elle, une exclusion posée sur un horodatage erroné
-    passerait sans bruit et retirerait des agrégats... rien du tout, en
-    laissant croire le contraire.
+    Ce test existe pour une panne précise, et il échoue si on la réintroduit.
+
+    `mesure_exclu` portait une clé étrangère vers `mesure`. Poser une clé
+    étrangère sur une hypertable est accepté par TimescaleDB, mais ne tient
+    pas à l'usage : PostgreSQL vérifie la contrainte par une requête préparée,
+    et le plan générique qu'il retient à partir de la SIXIÈME exécution ne sait
+    plus exclure les chunks. La ligne référencée n'est alors pas trouvée, et
+    une insertion parfaitement valide est rejetée.
+
+    D'où un seuil qui n'a rien de métier : cinq exclusions passaient, six
+    échouaient. Une journée de panne réseau sur un site en produit 1440, et
+    l'ETL s'arrêtait là. La révision 0006 a retiré la contrainte.
+
+    Six lignes et non deux : en deçà du seuil, ce test passerait aussi avec la
+    clé étrangère remise, et ne protégerait plus de rien.
     """
+    count = 6
+    base = datetime(2030, 1, 1, tzinfo=UTC)
+    # Bornes calculées ici, et non par un `interval` SQL : PostgreSQL n'accepte
+    # pas de paramètre lié derrière ce mot-clé.
+    last = base + timedelta(minutes=count - 1)
+    window = {"site": SITE_WITH_READINGS, "base": base, "last": last}
     async with engine.connect() as conn:
         transaction = await conn.begin()
-        with pytest.raises(IntegrityError):
-            await conn.execute(
-                text(
-                    "INSERT INTO mesure_exclu (site_id, ts, raison)"
-                    " VALUES ('SITE001', '1999-01-01T00:00:00Z', 'inexistante')"
-                )
-            )
+        await conn.execute(
+            text(
+                "INSERT INTO mesure (site_id, ts, consumption_kw)"
+                " SELECT :site, ts, 1"
+                " FROM generate_series("
+                " CAST(:base AS timestamptz), CAST(:last AS timestamptz),"
+                " interval '1 minute') ts"
+            ),
+            window,
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO mesure_exclu (site_id, ts, raison)"
+                " SELECT :site, ts, 'network_loss'"
+                " FROM generate_series("
+                " CAST(:base AS timestamptz), CAST(:last AS timestamptz),"
+                " interval '1 minute') ts"
+            ),
+            window,
+        )
+        written = await conn.scalar(
+            text("SELECT count(*) FROM mesure_exclu WHERE ts >= :base"),
+            {"base": base},
+        )
+        assert written == count
         await transaction.rollback()
