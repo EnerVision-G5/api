@@ -72,6 +72,17 @@ class Settings(BaseSettings):
     # lecture en base.
     predict_timeout_seconds: float = 10.0
 
+    # Clé de service présentée au service d'inférence, en en-tête X-API-Key.
+    # Celui-ci relaie la simulation de pic, qui écrit sur la source : il exige
+    # désormais cette clé sur les routes du contrat, et refuse de démarrer
+    # sans elle (voir predict/services/serving/src/serving/auth.py).
+    #
+    # Vide par défaut, et l'API démarre quand même : le service d'inférence
+    # peut tourner avec SERVING_AUTH_ENABLED=false sur un poste de
+    # développement, où aucune clé n'est distribuée. En déploiement, la même
+    # valeur doit être posée des deux côtés.
+    predict_api_key: str = ""
+
     # --- Seuils des indicateurs de confiance ---------------------------------
     #
     # En configuration et non en constantes de module : ce sont des réglages de
