@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 # Chemin fixé par le contrat de predict, donc non configurable : seule
 # l'adresse du service change d'un environnement à l'autre. Le rendre
 # paramétrable inviterait à le désaligner du contrat.
+# En-tête portant la clé de service, tel que le service d'inférence
+# l'attend (predict/services/serving/src/serving/auth.py).
+API_KEY_HEADER = "X-API-Key"
+
 PREDICT_PATH = "/api/v1/predict"
 SITES_PATH = "/api/v1/sites"
 SPIKE_PATH = "/api/v1/simulate/spike/{site_id}"
@@ -75,7 +79,27 @@ def build_client() -> httpx.AsyncClient:
     par un client monté sur httpx.MockTransport. Sans cela, il faudrait un
     vrai service en écoute pour éprouver le délai dépassé ou une réponse 500.
     """
-    return httpx.AsyncClient(timeout=get_settings().predict_timeout_seconds)
+    settings = get_settings()
+    return httpx.AsyncClient(
+        timeout=settings.predict_timeout_seconds,
+        headers=service_headers(settings.predict_api_key),
+    )
+
+
+def service_headers(api_key: str) -> dict[str, str]:
+    """En-têtes présentés au service d'inférence.
+
+    La clé n'est pas un jeton d'utilisateur : elle identifie l'API métier
+    comme service appelant, et ne porte ni rôle ni session. D'où `X-API-Key`
+    et non `Authorization: Bearer`, que le JWT des utilisateurs occupe déjà —
+    les confondre inviterait à présenter l'un là où l'autre est attendu.
+
+    Une clé absente n'est pas envoyée vide : le service distingue « en-tête
+    absent » de « clé fausse » uniquement dans son journal, et lui envoyer une
+    chaîne vide rendrait ce journal illisible. Le cas se produit en
+    développement local, où le service tourne ouvert.
+    """
+    return {API_KEY_HEADER: api_key} if api_key else {}
 
 
 async def _call(

@@ -6,7 +6,7 @@
 # liste ci-dessous est donc la seule chose a relire quand la CI casse sur ZAP.
 # Retirer une ligne suffit a remettre la regle correspondante bloquante.
 #
-# En-tetes de securite (10020, 10021, 10035, 10038, 10063) : poses par le
+# En-tetes de securite (10020, 10021, 10035, 10038, 10063, 90004) : poses par le
 # reverse proxy devant l'API, absents du scan qui attaque uvicorn en direct
 # et en clair sur le runner. Les exiger ici ferait echouer chaque PR pour une
 # configuration qui ne vit pas dans ce repo.
@@ -15,6 +15,7 @@
 10035	IGNORE	Strict-Transport-Security Header Not Set
 10038	IGNORE	Content Security Policy Header Not Set
 10063	IGNORE	Permissions Policy Header Not Set
+90004	IGNORE	Cross-Origin-Resource-Policy Header Missing or Invalid
 # Directives de cache : sans objet pour des reponses JSON non stockables, et
 # l'API est jointe sans TLS ni proxy pendant le scan.
 10015	IGNORE	Incomplete or No Cache-control Header
@@ -26,3 +27,10 @@
 10027	IGNORE	Information Disclosure - Suspicious Comments
 10109	IGNORE	Modern Web Application
 90005	IGNORE	Sec-Fetch headers
+
+# Le script d'alerte sur code HTTP (100000) signale chaque 4xx et 5xx sans
+# distinguer : les 404 et 422 rendus aux sondes de ZAP sont le comportement
+# attendu, et le relais vers la source de mesures repond 502 sur le runner,
+# ou aucun amont n'existe. Les erreurs 500 non traitees restent visibles dans
+# uvicorn.log, publie avec le rapport.
+100000	IGNORE	HTTP Response Code Error
