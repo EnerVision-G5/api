@@ -9,9 +9,11 @@ d'idempotence.
 from collections.abc import Callable, Iterator
 from datetime import datetime
 
+import asyncpg
 import httpx
 import pytest
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
@@ -643,3 +645,130 @@ def test_aucune_cle_ne_produit_aucun_en_tete() -> None:
     from app.predict_client import service_headers
 
     assert service_headers("") == {}
+
+
+# --- Base indisponible au démarrage ------------------------------------------
+#
+# Au redémarrage de l'hôte, le démon Docker relance tous les conteneurs
+# ensemble sans lire les `depends_on` du compose : le job gagne la course sur
+# TimescaleDB le temps qu'il rejoue son WAL. L'exception traversait alors la
+# pile jusqu'à `SystemExit`, et le journal montrait quarante lignes de trace
+# asyncpg pour ce qui n'est qu'un ordre de démarrage.
+
+
+class EngineDouble:
+    """Moteur factice : `main` ferme le pool dans son `finally`."""
+
+    def __init__(self) -> None:
+        self.disposed = False
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+
+@pytest.fixture
+def failing_round(monkeypatch: pytest.MonkeyPatch) -> Callable[[Exception], None]:
+    """Fait échouer la tournée sur l'erreur donnée, sans toucher au vrai pool."""
+    engine = EngineDouble()
+    monkeypatch.setattr(predict_refresh, "get_engine", lambda: engine)
+
+    def fail_with(error: Exception) -> None:
+        async def refuse() -> int:
+            raise error
+
+        monkeypatch.setattr(predict_refresh, "refresh_all", refuse)
+
+    return fail_with
+
+
+async def test_une_base_qui_demarre_se_dit_en_une_ligne_d_information(
+    failing_round: Callable[[Exception], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C'est un ordre de démarrage, pas un incident : INFO, et pas de trace."""
+    failing_round(
+        asyncpg.exceptions.CannotConnectNowError(
+            "the database system is starting up",
+        ),
+    )
+
+    with caplog.at_level("INFO", logger="app.jobs.predict_refresh"):
+        code = await predict_refresh.main()
+
+    assert code == 1
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelname == "INFO"
+    assert caplog.records[0].exc_info is None
+    assert "base en attente" in caplog.text
+
+
+async def test_une_base_injoignable_reste_une_erreur(
+    failing_round: Callable[[Exception], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Injoignable n'est pas « en train de démarrer » : ça reste une erreur.
+
+    Une base absente pendant une heure doit se voir dans le journal comme
+    telle, sinon la boucle horaire tournerait à vide en silence.
+    """
+    failing_round(ConnectionRefusedError("Connect call failed ('172.24.0.4', 5432)"))
+
+    with caplog.at_level("INFO", logger="app.jobs.predict_refresh"):
+        code = await predict_refresh.main()
+
+    assert code == 1
+    assert caplog.records[0].levelname == "ERROR"
+    assert "base injoignable" in caplog.text
+
+
+async def test_le_moteur_est_ferme_meme_quand_la_base_manque(
+    failing_round: Callable[[Exception], None],
+) -> None:
+    """Le `finally` reste la seule chose qui ferme le pool."""
+    failing_round(ConnectionRefusedError("connexion refusée"))
+
+    await predict_refresh.main()
+
+    assert predict_refresh.get_engine().disposed
+
+
+async def test_une_erreur_de_code_n_est_pas_maquillee_en_base_absente(
+    failing_round: Callable[[Exception], None],
+) -> None:
+    """Le filet ne couvre que la connexion : le reste doit remonter.
+
+    Sans cette limite, une faute de frappe dans la tournée se lirait « base
+    injoignable » et on chercherait la panne du mauvais côté.
+    """
+    failing_round(AttributeError("'NoneType' object has no attribute 'site_id'"))
+
+    with pytest.raises(AttributeError):
+        await predict_refresh.main()
+
+
+def test_les_etats_de_demarrage_de_postgres_sont_reconnus() -> None:
+    starting = asyncpg.exceptions.CannotConnectNowError(
+        "the database system is starting up",
+    )
+
+    assert predict_refresh.is_db_warming_up(starting)
+    assert not predict_refresh.is_db_warming_up(ConnectionRefusedError("refusé"))
+
+
+def test_la_raison_du_driver_tient_sur_une_ligne() -> None:
+    """SQLAlchemy ajoute un lien vers sa documentation sous le message.
+
+    Le journal d'une boucle horaire n'a besoin que de la première ligne.
+    """
+    origin = Exception("connection failed: FATAL: starting up\nseconde ligne")
+    wrapped = OperationalError("SELECT 1", {}, origin)
+
+    assert predict_refresh.db_error_line(wrapped) == (
+        "connection failed: FATAL: starting up"
+    )
+
+
+def test_une_erreur_sans_message_se_dit_par_son_type() -> None:
+    assert predict_refresh.db_error_line(ConnectionRefusedError()) == (
+        "ConnectionRefusedError"
+    )
