@@ -22,7 +22,9 @@ import logging
 import sys
 from dataclasses import dataclass
 
+import asyncpg
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -38,6 +40,35 @@ from app.predictions_store import UnknownModelError, store_prediction
 logger = logging.getLogger("app.jobs.predict_refresh")
 
 ACTIVE_STATUS = "active"
+
+# Ce que Postgres répond tant qu'il n'accepte pas encore de connexion : il
+# rejoue son WAL, ou il s'arrête. Au redémarrage du poste, le conteneur du job
+# repart en même temps que la base et gagne la course de quelques secondes —
+# `depends_on: service_healthy` n'ordonne que `compose up`, pas la relance du
+# démon Docker. La boucle repassera au cycle suivant, et laisser remonter la
+# trace d'asyncpg jusqu'à `SystemExit` ferait chercher un bug là où il n'y a
+# qu'un ordre de démarrage.
+DB_WARMUP_MARKERS = (
+    "the database system is starting up",
+    "the database system is shutting down",
+    "the database system is in recovery mode",
+    "the database system is not yet accepting connections",
+)
+
+# Ce que remonte l'ouverture de connexion quand la base n'est pas là.
+#
+# `CannotConnectNowError` (SQLSTATE 57P03) y figure nommément : SQLAlchemy
+# n'enveloppe en `OperationalError` que les erreurs levées à travers son
+# curseur, jamais celles de `dialect.connect`, si bien que l'exception
+# d'asyncpg traverse la pile telle quelle jusqu'au `SystemExit`.
+#
+# `OSError` couvre le refus de connexion et la résolution du nom `db` : le job
+# ne touche à aucun fichier, elle ne peut donc rien vouloir dire d'autre ici.
+DB_UNAVAILABLE_ERRORS = (
+    OperationalError,
+    asyncpg.exceptions.CannotConnectNowError,
+    OSError,
+)
 
 
 @dataclass(frozen=True)
@@ -147,10 +178,40 @@ async def refresh_all() -> int:
     return 0
 
 
+def is_db_warming_up(error: BaseException) -> bool:
+    """Dit si la base refuse la connexion parce qu'elle démarre encore."""
+    message = str(error).lower()
+    return any(marker in message for marker in DB_WARMUP_MARKERS)
+
+
+def db_error_line(error: BaseException) -> str:
+    """Réduit une erreur de driver à sa raison, en une ligne.
+
+    SQLAlchemy ajoute à `str()` un lien vers sa documentation et asyncpg
+    déroule son propre enchaînement : le journal d'une boucle horaire n'a
+    besoin que de savoir pourquoi la tournée n'a pas eu lieu.
+    """
+    lines = str(getattr(error, "orig", None) or error).strip().splitlines()
+    return lines[0].strip() if lines else type(error).__name__
+
+
 async def main() -> int:
-    """Point d'entrée asynchrone : exécute la tournée et libère le moteur."""
+    """Point d'entrée asynchrone : exécute la tournée et libère le moteur.
+
+    Une base injoignable est le seul échec qui n'appartient pas à un site :
+    elle empêche la tournée d'exister, là où `refresh_site` absorbe déjà tout
+    le reste. Elle sort donc par une ligne de journal, jamais par une trace.
+    """
     try:
         return await refresh_all()
+    except DB_UNAVAILABLE_ERRORS as error:
+        # Une requête fautive lèverait ProgrammingError : ici la faute est
+        # toujours du côté de la base, pas du SQL de la tournée.
+        if is_db_warming_up(error):
+            logger.info("base en attente : elle démarre encore.")
+        else:
+            logger.error("base injoignable : %s", db_error_line(error))
+        return 1
     finally:
         # Le processus s'arrête juste après : fermer le pool évite un
         # avertissement de connexions abandonnées à la sortie.

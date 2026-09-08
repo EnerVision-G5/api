@@ -430,9 +430,11 @@ async def seeded_database(engine) -> None:
         await session.flush()
         session.add_all(_readings())
         await session.flush()
-        # Après les mesures, jamais avant : `mesure_exclu` porte une clé
-        # étrangère vers `mesure`, et une exclusion posée sur une mesure absente
-        # serait rejetée par la base.
+        # Après les mesures, jamais avant. La base ne l'impose plus depuis
+        # que la clé étrangère vers l'hypertable a été retirée (révision
+        # 0006), mais l'ordre reste celui de l'ETL : une exclusion n'a de sens
+        # que posée sur une mesure écrite, et un jeu de test qui l'inverserait
+        # décrirait un état que la chaîne ne produit pas.
         session.add_all(_exclusions())
         session.add_all(_alertes())
         session.add_all(_capteurs())
