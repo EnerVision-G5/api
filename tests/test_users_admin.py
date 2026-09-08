@@ -12,17 +12,18 @@ inadministrable.
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import LOCAL_PROVIDER, AppUser
-from app.password import verify_password
+from app.password import hash_password, verify_password
 from tests.conftest import (
+    FEDERATED_USERNAME,
+    LEGACY_USERNAME,
     READER_USERNAME,
     TEST_PASSWORD,
     WRITER_USERNAME,
     assert_error_response,
-    obtain_token,
 )
 
 pytestmark = pytest.mark.anyio
@@ -31,6 +32,51 @@ USERS_URL = "/api/v1/users"
 
 # Assez long pour la contrainte du DTO, et manifestement de test.
 NEW_PASSWORD = "mot-de-passe-de-test-1"
+
+# Comptes posés par le seed, qui doivent survivre à chaque test de ce fichier.
+SEEDED = frozenset(
+    {READER_USERNAME, WRITER_USERNAME, FEDERATED_USERNAME, LEGACY_USERNAME},
+)
+
+
+@pytest.fixture(autouse=True)
+async def restored_accounts(db_session: AsyncSession):
+    """Rend au jeu de comptes l'état que le seed lui a donné.
+
+    La base de test est peuplée **une fois pour la session** : la conftest le
+    dit, et c'était vrai tant qu'aucun test n'écrivait. Ceux-ci écrivent, et
+    trois d'entre eux se contamineraient sans cette restauration :
+
+    - réinitialiser le mot de passe de `dev.reader` empêche les tests suivants
+      d'obtenir un jeton, puisque `obtain_token` passe par le vrai endpoint ;
+    - promouvoir un second `writer` fait mentir le garde-fou du dernier
+      writer, qui compte les comptes ;
+    - rétrograder `dev.writer` prive les tests suivants du rôle nécessaire
+      pour appeler ces routes.
+
+    Le nettoyage a lieu **après** chaque test plutôt qu'avant : un échec laisse
+    alors la base dans un état propre pour les fichiers suivants, et non dans
+    celui qui a fait échouer.
+    """
+    yield
+
+    await db_session.execute(
+        delete(AppUser).where(AppUser.oauth_subject.not_in(SEEDED)),
+    )
+    # Rôles et mots de passe remis à leur valeur d'origine. Le hachage est
+    # recalculé plutôt que mémorisé : argon2 sale chaque empreinte, donc deux
+    # hachages du même mot de passe diffèrent, et seul le mot de passe compte.
+    await db_session.execute(
+        update(AppUser)
+        .where(AppUser.oauth_subject == READER_USERNAME)
+        .values(role="reader", password_hash=hash_password(TEST_PASSWORD)),
+    )
+    await db_session.execute(
+        update(AppUser)
+        .where(AppUser.oauth_subject == WRITER_USERNAME)
+        .values(role="writer", password_hash=hash_password(TEST_PASSWORD)),
+    )
+    await db_session.commit()
 
 
 async def _find(session: AsyncSession, username: str) -> AppUser | None:
@@ -77,8 +123,8 @@ class TestList:
         # action impossible.
         response = await writer_client.get(USERS_URL)
 
-        for row in response.json():
-            assert row["can_sign_in"] is True
+        usernames = [row["username"] for row in response.json()]
+        assert FEDERATED_USERNAME not in usernames
 
     async def test_ne_publie_jamais_le_hachage(self, writer_client: AsyncClient) -> None:
         response = await writer_client.get(USERS_URL)
@@ -361,12 +407,35 @@ class TestGardeFous:
 
     async def test_refuse_de_supprimer_le_dernier_writer(
         self,
-        writer_client: AsyncClient,
         anonymous_client: AsyncClient,
         db_session: AsyncSession,
+        auth_disabled: None,
     ) -> None:
-        # Un second writer supprime le premier : l'auto-suppression n'entre
-        # pas en jeu, seul le garde-fou du dernier writer doit parler.
+        # Ce garde-fou n'est atteignable que sans authentification, et c'est
+        # une propriété de l'API, pas une facilité de test : pour supprimer le
+        # dernier writer en étant authentifié, il faudrait être writer sans
+        # être ce dernier writer — donc être un second writer, ce qui le rend
+        # aussitôt non-dernier. Le refus d'auto-suppression répond alors
+        # toujours en premier, comme le vérifie le test précédent.
+        #
+        # AUTH_ENABLED à false, aucun appelant n'est identifié : le contrôle
+        # d'auto-suppression est sans objet, et le compte du dernier writer
+        # devient une cible atteignable.
+        writer = await _find(db_session, WRITER_USERNAME)
+        assert writer is not None
+
+        response = await anonymous_client.delete(f"{USERS_URL}/{writer.user_id}")
+
+        assert response.status_code == 409
+        assert "dernier compte writer" in response.json()["detail"]
+
+    async def test_supprime_un_writer_s_il_en_reste_un(
+        self,
+        writer_client: AsyncClient,
+    ) -> None:
+        # Le pendant du refus : dès qu'un second writer existe, il est
+        # supprimable — ce n'est pas le rôle qui protège, c'est le fait d'être
+        # le dernier.
         created = await writer_client.post(
             USERS_URL,
             json={
@@ -377,20 +446,10 @@ class TestGardeFous:
             },
         )
         assert created.status_code == 201, created.text
-        ephemere_id = created.json()["user_id"]
 
-        # Le compte du fixture writer est supprimé par le nouveau writer.
-        token = await obtain_token(anonymous_client, WRITER_USERNAME)
-        anonymous_client.headers["Authorization"] = f"Bearer {token}"
-        writer = await _find(db_session, WRITER_USERNAME)
-        assert writer is not None
+        response = await writer_client.delete(f"{USERS_URL}/{created.json()['user_id']}")
 
-        premier = await anonymous_client.delete(f"{USERS_URL}/{ephemere_id}")
-        assert premier.status_code == 204, premier.text
-
-        # Il ne reste qu'un writer : le supprimer est refusé.
-        second = await anonymous_client.delete(f"{USERS_URL}/{writer.user_id}")
-        assert second.status_code == 409
+        assert response.status_code == 204, response.text
 
 
 class TestDelete:
