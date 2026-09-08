@@ -27,6 +27,7 @@ from app.routers import (
     predictions,
     sites,
     source_relay,
+    users,
 )
 from app.schemas.auth import UserOut
 
@@ -54,7 +55,7 @@ from app.schemas.auth import UserOut
 # des modèles et la version promue, en base depuis le schéma v1.0 sans que
 # rien ne les lise ; et les recommandations d'action d'EV-32, que le
 # dashboard attendait sans les anticiper.
-CONTRACT_VERSION = "1.5.0"
+CONTRACT_VERSION = "1.6.0"
 
 API_PREFIX = "/api/v1"
 
@@ -139,6 +140,9 @@ app.include_router(indicators.router, prefix=API_PREFIX)
 # reste celui qui se lit — le littéral après le paramétré fonctionne ici,
 # l'inverse serait à vérifier à chaque ajout.
 app.include_router(source_relay.router, prefix=API_PREFIX)
+# Gestion des comptes (EV-55). Collection propre, sans interaction avec les
+# chemins de sites : /users ne croise aucun paramètre déclaré plus haut.
+app.include_router(users.router, prefix=API_PREFIX)
 
 
 def _normalize_error_responses(spec: dict[str, Any]) -> dict[str, Any]:
